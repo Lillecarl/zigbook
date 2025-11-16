@@ -12,7 +12,7 @@
 <chapter xml:id="overview">
 <title>Overview</title>
 <simpara>Chapter 1 established the building blocks for running a Zig program and working with data; now we turn those values into decisions by walking through the language&#8217;s control-flow primitives, as described in <link xl:href="https://ziglang.org/documentation/master/#if">#if</link>. Control flow in Zig is expression-oriented, so choosing a branch or looping often produces a value instead of merely guiding execution.</simpara>
-<simpara>We explore the semantics behind loops, labeled flow, and <literal>switch</literal>, emphasizing how <literal>break</literal>, <literal>continue</literal>, and <literal>else</literal> clauses communicate intent in both safe and release builds; see <link xl:href="https://ziglang.org/documentation/master/#While">#While</link>, <link xl:href="https://ziglang.org/documentation/master/#for">#for</link>, and <link xl:href="https://ziglang.org/documentation/master/#switch">#switch</link>.</simpara>
+<simpara>We explore the semantics behind loops, labeled flow, and <literal>switch</literal>, emphasizing how <literal>break</literal>, <literal>continue</literal>, and <literal>else</literal> clauses communicate intent in both safe and release builds; see <link xl:href="https://ziglang.org/documentation/master/#while">#While</link>, <link xl:href="https://ziglang.org/documentation/master/#for">#for</link>, and <link xl:href="https://ziglang.org/documentation/master/#switch">#switch</link>.</simpara>
 </chapter>
 <chapter xml:id="learning-goals">
 <title>Learning Goals</title>

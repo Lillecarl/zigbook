@@ -4,7 +4,7 @@ project: Zigbook – The Zig Programming Language Book
 url: https://zigbook.net
 repository: https://github.com/zigbook/zigbook
 license: MIT (see LICENSE in repository)
-generated_at: 2025-11-16T01:38:33.337Z
+generated_at: 2025-11-16T08:47:05.234Z
 zig_version: 0.15.2
 
 notes:
@@ -111,7 +111,7 @@ Zig does not try to be everything to everyone. It chooses transparency over conv
 
 Four capabilities define the Zig experience and appear throughout this book: v0.15.2 (https://ziglang.org/download/0.15.1/release-notes.html)
 
-1. No hidden control flow. The compiler never injects allocators, goroutines, or implicit destructors. Machine code corresponds directly to what you wrote. When you read Zig, you know exactly what will execute. #Control-Flow (https://ziglang.org/documentation/master/#Control-Flow)
+1. No hidden control flow. The compiler never injects allocators, goroutines, or implicit destructors. Machine code corresponds directly to what you wrote. When you read Zig, you know exactly what will execute.
 2. Manual memory with guardrails. Allocator APIs are first-class parameters, not hidden runtime machinery. Debug and ReleaseSafe modes catch double frees, use-after-free, and buffer overflows during development. ReleaseFast strips those checks for production. You control the tradeoff. 10 (10__allocators-and-memory-management.xml)
 3. Compile-time execution. Any function can run at `comptime`, turning the compiler into a metaprogramming engine. Generate lookup tables, validate schemas, or tailor generic APIs, all before the binary ships. Zero runtime cost, full language access. 15 (15__comptime-and-reflection.xml)
 4. Effortless cross-compilation. The bundled toolchain targets dozens of OS/architecture pairs with a single command. No separate toolchains, no cross-compilation SDKs, no configuration files—just `-target` and go. 41 (41__cross-compilation-and-wasm.xml)
@@ -170,7 +170,7 @@ Even this minimal example showcases Zig’s uniform tooling story: the same `zig
 [section_id: interactive-example]
 [section_url: https://zigbook.net/chapters/00__zigbook_introduction#interactive-example]
 
-Once “Hello, world!” works, extend the program into a simple loop to witness Zig’s explicit control flow and formatting syntax, as described in #While (https://ziglang.org/documentation/master/#While).
+Once “Hello, world!” works, extend the program into a simple loop to witness Zig’s explicit control flow and formatting syntax, as described in #While (https://ziglang.org/documentation/master/#while).
 
 ```zig
 const std = @import("std");
@@ -747,7 +747,7 @@ Using a buffered writer mirrors the standard library’s own initialization temp
 
 Chapter 1 established the building blocks for running a Zig program and working with data; now we turn those values into decisions by walking through the language’s control-flow primitives, as described in #if (https://ziglang.org/documentation/master/#if). Control flow in Zig is expression-oriented, so choosing a branch or looping often produces a value instead of merely guiding execution.
 
-We explore the semantics behind loops, labeled flow, and `switch`, emphasizing how `break`, `continue`, and `else` clauses communicate intent in both safe and release builds; see #While (https://ziglang.org/documentation/master/#While), #for (https://ziglang.org/documentation/master/#for), and #switch (https://ziglang.org/documentation/master/#switch).
+We explore the semantics behind loops, labeled flow, and `switch`, emphasizing how `break`, `continue`, and `else` clauses communicate intent in both safe and release builds; see #While (https://ziglang.org/documentation/master/#while), #for (https://ziglang.org/documentation/master/#for), and #switch (https://ziglang.org/documentation/master/#switch).
 
 ## Section: Learning Goals
 [section_id: learning-goals]

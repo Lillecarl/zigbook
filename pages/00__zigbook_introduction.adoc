@@ -126,14 +126,13 @@ The standard library embraces straightforward building blocks: files as modules,
 **Zig and Go/Python:** Compared to garbage-collected languages, Zig gives you granular control over memory and performance. Its simplicity and explicit allocators make it ideal for embedded systems, kernels, and performance-critical paths. But Zig's reach extends beyond traditional systems programming—developers use it for CLI tools, game development, WebAssembly modules, and high-performance network services. xref:41__cross-compilation-and-wasm.adoc[41]
 
 Zig does not try to be everything to everyone. It chooses transparency over convenience, explicitness over inference, and understanding over abstraction. If you value knowing exactly what your code does, Zig is your language.
+
 [[key-capabilities]]
 == What Zig Gives You
 
 Four capabilities define the Zig experience and appear throughout this book: link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
 
-. *No hidden control flow.* The compiler never injects allocators, goroutines, or implicit destructors. Machine code corresponds directly to what you wrote. When you read Zig, you know exactly what will execute. link:https://ziglang.org/documentation/master/#Control-Flow[#Control-Flow]
-
-
+. *No hidden control flow.* The compiler never injects allocators, goroutines, or implicit destructors. Machine code corresponds directly to what you wrote. When you read Zig, you know exactly what will execute. 
 
 . *Manual memory with guardrails.* Allocator APIs are first-class parameters, not hidden runtime machinery. Debug and ReleaseSafe modes catch double frees, use-after-free, and buffer overflows during development. ReleaseFast strips those checks for production. You control the tradeoff. xref:10__allocators-and-memory-management.adoc[10]
 
@@ -188,7 +187,7 @@ Even this minimal example showcases Zig's uniform tooling story: the same `zig r
 [[interactive-example]]
 == An Interactive Loop
 
-Once “Hello, world!” works, extend the program into a simple loop to witness Zig’s explicit control flow and formatting syntax, as described in link:https://ziglang.org/documentation/master/#While[#While].
+Once “Hello, world!” works, extend the program into a simple loop to witness Zig’s explicit control flow and formatting syntax, as described in link:https://ziglang.org/documentation/master/#while[#while].
 
 [source,zig]
 ----

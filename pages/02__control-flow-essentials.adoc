@@ -40,7 +40,7 @@ xref_complete: true
 
 Chapter 1 established the building blocks for running a Zig program and working with data; now we turn those values into decisions by walking through the language's control-flow primitives, as described in link:https://ziglang.org/documentation/master/#if[#if]. Control flow in Zig is expression-oriented, so choosing a branch or looping often produces a value instead of merely guiding execution.
 
-We explore the semantics behind loops, labeled flow, and `switch`, emphasizing how `break`, `continue`, and `else` clauses communicate intent in both safe and release builds; see link:https://ziglang.org/documentation/master/#While[#While], link:https://ziglang.org/documentation/master/#for[#for], and link:https://ziglang.org/documentation/master/#switch[#switch].
+We explore the semantics behind loops, labeled flow, and `switch`, emphasizing how `break`, `continue`, and `else` clauses communicate intent in both safe and release builds; see link:https://ziglang.org/documentation/master/#while[#while], link:https://ziglang.org/documentation/master/#for[#for], and link:https://ziglang.org/documentation/master/#switch[#switch].
 
 [[learning-goals]]
 == Learning Goals

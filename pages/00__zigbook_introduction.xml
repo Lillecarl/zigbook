@@ -97,7 +97,7 @@ Edsger W. Dijkstra
 <simpara>Four capabilities define the Zig experience and appear throughout this book: <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link></simpara>
 <orderedlist numeration="arabic">
 <listitem>
-<simpara><emphasis role="strong">No hidden control flow.</emphasis> The compiler never injects allocators, goroutines, or implicit destructors. Machine code corresponds directly to what you wrote. When you read Zig, you know exactly what will execute. <link xl:href="https://ziglang.org/documentation/master/#Control-Flow">#Control-Flow</link></simpara>
+<simpara><emphasis role="strong">No hidden control flow.</emphasis> The compiler never injects allocators, goroutines, or implicit destructors. Machine code corresponds directly to what you wrote. When you read Zig, you know exactly what will execute. </simpara>
 </listitem>
 <listitem>
 <simpara><emphasis role="strong">Manual memory with guardrails.</emphasis> Allocator APIs are first-class parameters, not hidden runtime machinery. Debug and ReleaseSafe modes catch double frees, use-after-free, and buffer overflows during development. ReleaseFast strips those checks for production. You control the tradeoff. <link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
@@ -146,7 +146,7 @@ Edsger W. Dijkstra
 </chapter>
 <chapter xml:id="interactive-example">
 <title>An Interactive Loop</title>
-<simpara>Once “Hello, world!” works, extend the program into a simple loop to witness Zig’s explicit control flow and formatting syntax, as described in <link xl:href="https://ziglang.org/documentation/master/#While">#While</link>.</simpara>
+<simpara>Once “Hello, world!” works, extend the program into a simple loop to witness Zig’s explicit control flow and formatting syntax, as described in <link xl:href="https://ziglang.org/documentation/master/#while">#While</link>.</simpara>
 <programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 00__zigbook_introduction.adoc - include::example$chapters-data/code/00__zigbook-introduction/squares_demo.zig[]</programlisting>
 <formalpara>
 <title>Run</title>
