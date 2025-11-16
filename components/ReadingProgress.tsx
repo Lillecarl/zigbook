@@ -13,21 +13,24 @@ export default function ReadingProgress({ targetId }: ReadingProgressProps) {
     const target = document.getElementById(targetId)
     if (!target) return
 
+    // Find the scrollable main content area
+    const scrollContainer = target.closest('main')
+    if (!scrollContainer) return
+
     let ticking = false
 
     const updateProgress = () => {
-      const rect = target.getBoundingClientRect()
-      const viewportHeight = window.innerHeight || document.documentElement.clientHeight
-      const totalScrollable = rect.height - viewportHeight
+      const scrollTop = scrollContainer.scrollTop
+      const scrollHeight = scrollContainer.scrollHeight
+      const clientHeight = scrollContainer.clientHeight
+      const totalScrollable = scrollHeight - clientHeight
 
       if (totalScrollable <= 0) {
-        // Short content: show as complete once the title has reached the top
-        setProgress(rect.top <= 0 ? 1 : 0)
+        setProgress(scrollTop > 0 ? 1 : 0)
         return
       }
 
-      const distance = Math.min(Math.max(-rect.top, 0), totalScrollable)
-      const ratio = distance / totalScrollable
+      const ratio = scrollTop / totalScrollable
       setProgress(Number.isFinite(ratio) ? ratio : 0)
     }
 
@@ -42,11 +45,11 @@ export default function ReadingProgress({ targetId }: ReadingProgressProps) {
     }
 
     updateProgress()
-    window.addEventListener('scroll', handleScroll, { passive: true })
+    scrollContainer.addEventListener('scroll', handleScroll, { passive: true })
     window.addEventListener('resize', updateProgress)
 
     return () => {
-      window.removeEventListener('scroll', handleScroll)
+      scrollContainer.removeEventListener('scroll', handleScroll)
       window.removeEventListener('resize', updateProgress)
     }
   }, [targetId])

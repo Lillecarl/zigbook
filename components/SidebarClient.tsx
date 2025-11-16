@@ -25,7 +25,7 @@ export default function SidebarClient({ chapters, currentChapterId }: SidebarCli
   const hasQuery = normalizedQuery.length > 0
 
   return (
-    <aside className="sticky top-0 hidden h-screen w-80 overflow-y-auto border-r border-base-300 bg-base-100 lg:block">
+    <aside className="hidden lg:flex lg:h-full lg:w-80 lg:shrink-0 lg:flex-col lg:overflow-y-auto border-r border-base-300 bg-base-100">
       <div className="p-4">
         <Link href="/" className="btn btn-ghost btn-block justify-start mb-6">
           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

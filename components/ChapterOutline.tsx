@@ -64,11 +64,14 @@ export default function ChapterOutline({ targetId = 'chapter-article' }: Chapter
   useEffect(() => {
     if (!headings.length) return
 
+    const article = document.getElementById(targetId)
+    const scrollContainer = article?.closest('main')
+
     const handleScroll = () => {
       const items = headingElementsRef.current
       if (!items.length) return
 
-      const offset = 96 // px from top (~ navbar height)
+      const offset = 96 // px from top (~ navbar + progress)
 
       let currentId = items[0].id
       for (const el of items) {
@@ -96,14 +99,25 @@ export default function ChapterOutline({ targetId = 'chapter-article' }: Chapter
     }
 
     handleScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    window.addEventListener('resize', handleScroll)
 
-    return () => {
-      window.removeEventListener('scroll', onScroll)
-      window.removeEventListener('resize', handleScroll)
+    if (scrollContainer instanceof HTMLElement) {
+      scrollContainer.addEventListener('scroll', onScroll, { passive: true })
+      window.addEventListener('resize', handleScroll)
+
+      return () => {
+        scrollContainer.removeEventListener('scroll', onScroll)
+        window.removeEventListener('resize', handleScroll)
+      }
+    } else {
+      window.addEventListener('scroll', onScroll, { passive: true })
+      window.addEventListener('resize', handleScroll)
+
+      return () => {
+        window.removeEventListener('scroll', onScroll)
+        window.removeEventListener('resize', handleScroll)
+      }
     }
-  }, [headings])
+  }, [headings, targetId])
 
   const handleClick = (id: string) => (event: React.MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault()
@@ -127,8 +141,8 @@ export default function ChapterOutline({ targetId = 'chapter-article' }: Chapter
   if (!hasHeadings) return null
 
   return (
-    <aside className="hidden lg:block w-64 xl:w-72 pr-6 py-6">
-      <nav aria-label="In-page chapters" className="sticky top-[5rem]">
+    <aside className="hidden lg:flex lg:h-full lg:w-64 xl:w-72 lg:shrink-0 lg:flex-col border-l border-base-300 bg-base-200/60 pr-4 py-6">
+      <nav aria-label="In-page chapters" className="h-full overflow-y-auto">
         <div className="rounded-xl border border-base-300/40 bg-base-100/70 px-4 py-4 shadow-[0_10px_40px_rgba(0,0,0,0.25)] backdrop-blur">
           <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-base-content/70">
             On this page
