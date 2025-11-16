@@ -39,7 +39,7 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
   return (
     <>
       {/* Main Navbar */}
-      <div className="navbar bg-base-100 shadow-lg sticky top-0 z-50 px-2 sm:px-4">
+      <div className="navbar bg-base-100 shadow-lg sticky top-0 z-50 px-2 sm:px-4 w-full">
         <div className="flex-none lg:hidden">
           <label 
             htmlFor="nav-drawer" 

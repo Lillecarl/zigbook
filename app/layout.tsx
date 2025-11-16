@@ -55,8 +55,8 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
-      <body>
+    <html lang="en" className="w-full">
+      <body className="w-full min-w-full overflow-x-hidden">
         <CommandPaletteProvider>{children}</CommandPaletteProvider>
       </body>
     </html>

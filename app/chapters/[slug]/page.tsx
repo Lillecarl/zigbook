@@ -30,15 +30,15 @@ export default async function ChapterPage({
     : (content.title as any)?._ || currentChapter?.title || 'Untitled'
 
   return (
-    <div className="min-h-screen bg-base-200">
+    <div className="min-h-screen bg-base-200 w-full">
       <Navbar chapters={chapters} currentChapterId={params.slug} />
       <ReadingProgress targetId="chapter-article" />
       
-      <div className="flex">
+      <div className="flex w-full">
         <Sidebar currentChapterId={params.slug} />
 
-        <div className="flex flex-1">
-          <main className="flex-1 px-4 sm:px-6 lg:px-10 py-6 lg:py-10">
+        <div className="flex flex-1 w-full">
+          <main className="flex-1 px-4 sm:px-6 lg:px-10 py-6 lg:py-10 w-full">
             <div className="mx-auto w-full max-w-4xl space-y-6 lg:space-y-8">
             {/* Breadcrumbs */}
             <nav className="text-xs sm:text-sm text-base-content/70">

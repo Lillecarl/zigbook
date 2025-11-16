@@ -6,7 +6,7 @@ import HeroBackground from '@/components/HeroBackground'
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-base-200 relative overflow-hidden">
+    <div className="min-h-screen bg-base-200 relative overflow-hidden w-full">
       <HeroBackground />
 
       {/* Navbar */}

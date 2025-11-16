@@ -2,6 +2,39 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Ensure full viewport width on all devices */
+@layer base {
+  html {
+    width: 100%;
+    overflow-x: hidden;
+  }
+  
+  body {
+    width: 100%;
+    min-width: 100%;
+    overflow-x: hidden;
+    position: relative;
+  }
+  
+  /* Ensure Next.js root divs take full width */
+  #__next,
+  #__next > div {
+    width: 100%;
+    min-width: 100%;
+  }
+  
+  * {
+    max-width: 100%;
+  }
+  
+  /* Prevent any element from creating horizontal scroll */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+}
+
 /* Custom code block styling */
 pre[class*="language-"] {
   @apply my-4 text-sm leading-relaxed;
