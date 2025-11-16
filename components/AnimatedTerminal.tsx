@@ -2,13 +2,96 @@
 
 import { useEffect, useState, useRef, KeyboardEvent } from 'react'
 
+const normalizeCommand = (raw: string) => raw.trim().replace(/\s+/g, ' ').toLowerCase()
+
+const CANONICAL_COMMANDS = {
+  build: 'zig build zigbook',
+  help: 'help',
+  clear: 'clear',
+} as const
+
+const BUILD_ALIASES = [
+  CANONICAL_COMMANDS.build,
+  'zig build',
+  'zig build -Drelease-fast',
+  'start',
+  'run',
+  'start zigbook',
+  'run zigbook',
+].map(normalizeCommand)
+
+const HELP_ALIASES = [CANONICAL_COMMANDS.help, '?', 'man', 'man zigbook', '--help', '-h'].map(
+  normalizeCommand
+)
+
+const CLEAR_ALIASES = [CANONICAL_COMMANDS.clear, 'cls'].map(normalizeCommand)
+
+const ABOUT_ALIASES = ['about', 'zigbook', 'whoami'].map(normalizeCommand)
+
+const SUGGESTABLE_COMMANDS = (Object.values(CANONICAL_COMMANDS) as string[]).map(cmd => ({
+  display: cmd,
+  normalized: normalizeCommand(cmd),
+}))
+
+function levenshtein(a: string, b: string): number {
+  const aLen = a.length
+  const bLen = b.length
+
+  if (aLen === 0) return bLen
+  if (bLen === 0) return aLen
+
+  const dp = Array.from({ length: aLen + 1 }, () => new Array<number>(bLen + 1))
+
+  for (let i = 0; i <= aLen; i++) dp[i][0] = i
+  for (let j = 0; j <= bLen; j++) dp[0][j] = j
+
+  for (let i = 1; i <= aLen; i++) {
+    for (let j = 1; j <= bLen; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1, // deletion
+        dp[i][j - 1] + 1, // insertion
+        dp[i - 1][j - 1] + cost // substitution
+      )
+    }
+  }
+
+  return dp[aLen][bLen]
+}
+
+function findClosestCommand(normalizedInput: string): string | null {
+  if (!normalizedInput) return null
+
+  let bestCommand: string | null = null
+  let bestDistance = Number.POSITIVE_INFINITY
+
+  for (const { display, normalized } of SUGGESTABLE_COMMANDS) {
+    const distance = levenshtein(normalizedInput, normalized)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestCommand = display
+    }
+  }
+
+  const length = Math.max(normalizedInput.length, bestCommand?.length ?? 0)
+  if (!bestCommand || length === 0) return null
+
+  // Only suggest if the edit distance is reasonably small relative to the length
+  const ratio = bestDistance / length
+  if (bestDistance <= 1 || ratio <= 0.35) {
+    return bestCommand
+  }
+
+  return null
+}
+
 export default function AnimatedTerminal() {
   const [input, setInput] = useState('')
   const [history, setHistory] = useState<string[]>([
-    'Welcome to Zigbook',
+    'Welcome to Zigbook 🦎',
     '',
     'Ready to transform how you think about software?',
-    'Type: zig build zigbook',
+    'Exec: zig build zigbook',
     '',
     '$ '
   ])
@@ -55,13 +138,21 @@ export default function AnimatedTerminal() {
     if (e.key === 'Enter') {
       e.preventDefault()
       const cmd = input.trim()
-      
-      if (cmd === 'zig build zigbook') {
+      const normalized = normalizeCommand(input)
+
+      if (!cmd) {
+        setHistory(prev => [...prev, '$ '])
+        setInput('')
+        return
+      }
+
+      // Main entry command (accept a few variants, ignore case & extra spaces)
+      if (BUILD_ALIASES.includes(normalized)) {
         setHistory(prev => [
           ...prev, 
           `$ ${cmd}`,
           '',
-          '🚀 Initializing Zigbook...',
+          '🦎 Initializing Zigbook...',
           '📚 Loading 61 chapters...',
           '✨ Preparing your transformation...',
           '',
@@ -73,34 +164,90 @@ export default function AnimatedTerminal() {
         setTimeout(() => {
           window.location.href = '/chapters/00__zigbook_introduction'
         }, 2000)
-      } else if (cmd === 'clear') {
+      // Clear terminal (with common aliases)
+      } else if (CLEAR_ALIASES.includes(normalized)) {
         setHistory(['$ '])
         setInput('')
-      } else if (cmd === 'help') {
+      // Help / usage information
+      } else if (HELP_ALIASES.includes(normalized)) {
         setHistory(prev => [
           ...prev,
           `$ ${cmd}`,
           '',
           'Available commands:',
-          '  zig build zigbook  - Start your learning journey',
-          '  help              - Show this message',
-          '  clear             - Clear terminal',
+          '  zig build zigbook   - Start your learning journey',
+          '  help                - Show this message',
+          '  clear               - Clear terminal output',
+          '',
+          'Tips:',
+          '  • Commands are case-insensitive and ignore extra spaces.',
+          '  • Try `zig build zigbook` to jump into Chapter 0.',
+          '',
+          'There may also be a couple of hidden commands waiting to be discovered.',
           '',
           '$ '
         ])
         setInput('')
+      // About / info easter egg
+      } else if (ABOUT_ALIASES.includes(normalized)) {
+        setHistory(prev => [
+          ...prev,
+          `$ ${cmd}`,
+          '',
+          'Zigbook is an open-source, in-depth guide to Zig that emphasizes real-world projects,',
+          'composable patterns, and understanding how your code actually works under the hood.',
+          '',
+          'Learn more at https://zigbook.net',
+          '',
+          '$ ',
+        ])
+        setInput('')
+      // Fun easter eggs
+      } else if (normalized === 'sudo zig build zigbook') {
+        setHistory(prev => [
+          ...prev,
+          `$ ${cmd}`,
+          '',
+          "[sudo] password for zigbook: ********",
+          'Permission denied: you already have all the access you need here.',
+          'Try: zig build zigbook',
+          '$ ',
+        ])
+        setInput('')
+      } else if (normalized === 'rm -rf /' || normalized === 'rm -rf /*') {
+        setHistory(prev => [
+          ...prev,
+          `$ ${cmd}`,
+          '',
+          "Error: refusing to run a destructive command in this demo shell.",
+          'Your real filesystem is safe. Try: zig build zigbook instead.',
+          '$ ',
+        ])
+        setInput('')
+      } else if (normalized === 'motivate' || normalized === 'inspire') {
+        setHistory(prev => [
+          ...prev,
+          `$ ${cmd}`,
+          '',
+          'Every expert Zig developer was once where you are now. The important part is showing up,',
+          'typing the code, and reading the errors rather than fearing them.',
+          '',
+          'You are absolutely capable of learning this. Let\'s go build something.',
+          '',
+          '$ ',
+        ])
+        setInput('')
       } else if (cmd) {
+        const suggestion = findClosestCommand(normalized)
         setHistory(prev => [
           ...prev, 
           `$ ${cmd}`, 
           `zsh: command not found: ${cmd}`,
+          ...(suggestion ? [`Did you mean: ${suggestion}?`] : []),
           '',
           'Try: zig build zigbook',
           '$ '
         ])
-        setInput('')
-      } else {
-        setHistory(prev => [...prev, '$ '])
         setInput('')
       }
     }
