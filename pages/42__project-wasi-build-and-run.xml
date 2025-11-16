@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>WASI Build &amp; Run</subtitle>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>With the cross-compilation mechanics from the previous chapter (see <link xl:href="41__cross-compilation-and-wasm.xml">41</link>), we can now assemble a complete WASI project that compiles to both native and WebAssembly targets using a single <literal>build.zig</literal>. This chapter constructs a small log analyzer CLI that reads input, processes it, and emits summary statistics—functionality that maps cleanly to WASI&#8217;s file and stdio capabilities (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/os/wasi.zig">wasi.zig</link>). You&#8217;ll write the application once, then generate and test both a Linux executable and a <literal>.wasm</literal> module using runtimes like Wasmtime or Wasmer (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link>).</simpara>
+<simpara>The build system will define multiple targets, each with its own artifact, and you&#8217;ll wire run steps that automatically launch the correct runtime based on target (see <link xl:href="22__build-system-deep-dive.xml">22</link>). By the end, you&#8217;ll have a working template for shipping portable command-line tools as both native binaries and WASI modules.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Structure a Zig project with shared source code that compiles cleanly to <literal>x86_64-linux</literal> and <literal>wasm32-wasi</literal> (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Target.zig">Target.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Integrate multiple <literal>addExecutable</literal> targets in <literal>build.zig</literal> with distinct optimization and naming strategies (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build.zig">Build.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Configure run steps with runtime detection (native vs Wasmtime/Wasmer) and pass arguments through to the final binary (see <link xl:href="22__build-system-deep-dive.xml">22</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Test the same logic path in both native and WASI environments, validating cross-platform behavior (see <link xl:href="https://ziglang.org/documentation/master/#Command-line-flags">#Command-line-flags</link>).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="project-structure">
+<title>Project Structure</title>
+<simpara>We organize the analyzer as a single-package workspace with a <literal>src/</literal> directory containing the entry point and analysis logic. The <literal>build.zig</literal> will create two artifacts: <literal>log-analyzer-native</literal> and <literal>log-analyzer-wasi</literal>.</simpara>
+<section xml:id="directory-layout">
+<title>Directory Layout</title>
+<programlisting language="text" linenumbering="unnumbered">42-log-analyzer/
+├── build.zig
+├── build.zig.zon
+└── src/
+    ├── main.zig
+    └── analysis.zig</programlisting>
+<note>
+<simpara>The <literal>build.zig.zon</literal> is minimal since we have no external dependencies; it serves as metadata for potential future packaging (see <link xl:href="21__zig-init-and-package-metadata.xml">21</link>).</simpara>
+</note>
+</section>
+<section xml:id="build-zig-zon">
+<title>Package Metadata</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 42__project-wasi-build-and-run.adoc - include::example$chapters-data/code/42__project-wasi-build-and-run/build.zig.zon[]</programlisting>
+<tip>
+<simpara>The <literal>.minimum_zig_version</literal> field prevents accidental builds with older compilers that lack WASI improvements introduced in 0.15.2.</simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="build-system-setup">
+<title>Build System Setup</title>
+<simpara>Our <literal>build.zig</literal> defines two executables sharing the same root source file but targeting different platforms. We also add a custom run step for the WASI binary that detects available runtimes.</simpara>
+<section xml:id="build-zig-multi-target">
+<title>Multi-Target Build Script</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 42__project-wasi-build-and-run.adoc - include::example$chapters-data/code/42__project-wasi-build-and-run/build.zig[]</programlisting>
+<formalpara>
+<title>Build</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">(no output on success; artifacts installed to zig-out/bin/)</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara>The WASI target sets <literal>-OReleaseSmall</literal> to minimize module size, while the native target uses <literal>-OReleaseFast</literal> for runtime speed—demonstrating per-artifact optimization control.</simpara>
+</important>
+</section>
+</chapter>
+<chapter xml:id="analysis-logic">
+<title>Analysis Logic</title>
+<simpara>The analyzer reads the entire log content, splits it by newlines, counts occurrences of severity keywords (ERROR, WARN, INFO), and prints a summary. We factor the parsing into <literal>analysis.zig</literal> so it can be unit-tested independently of I/O.</simpara>
+<section xml:id="analysis-module">
+<title>Core Analysis Module</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 42__project-wasi-build-and-run.adoc - include::example$chapters-data/code/42__project-wasi-build-and-run/src/analysis.zig[]</programlisting>
+<note>
+<simpara>By accepting content as a slice, <literal>analyzeLog</literal> remains simple and testable. <literal>main.zig</literal> handles file reading, and the function just processes text (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/mem.zig">mem.zig</link>).</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="main-entry-point">
+<title>Main Entry Point</title>
+<simpara>The entry point parses command-line arguments, reads the entire file content (or stdin), delegates to <literal>analyzeLog</literal>, and prints the results. Both native and WASI builds share this code path; WASI handles file access through its virtualized filesystem or stdin.</simpara>
+<section xml:id="main-zig">
+<title>Main Source File</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 42__project-wasi-build-and-run.adoc - include::example$chapters-data/code/42__project-wasi-build-and-run/src/main.zig[]</programlisting>
+<tip>
+<simpara>The <literal>--input</literal> flag allows testing with files; omit it to read from stdin, which WASI runtimes can pipe easily. Note that WASI filesystem access requires explicit capability grants from the runtime (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/posix.zig">posix.zig</link>).</simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="building-and-running">
+<title>Building and Running</title>
+<simpara>With the source complete, we can build both targets and run them side-by-side to confirm identical behavior.</simpara>
+<section xml:id="native-build-run">
+<title>Native Execution</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build
+$ echo -e "INFO startup\nERROR failed\nWARN retry\nINFO success" &gt; sample.log
+$ ./zig-out/bin/log-analyzer-native --input sample.log</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">analyzing: sample.log
+results: INFO=2 WARN=1 ERROR=1</programlisting>
+</para>
+</formalpara>
+</section>
+<section xml:id="wasi-build-run">
+<title>WASI Execution with Wasmer (Stdin)</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build
+$ echo -e "INFO startup\nERROR failed\nWARN retry\nINFO success" | wasmer run zig-out/bin/log-analyzer-wasi.wasm</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">analyzing: stdin
+results: INFO=2 WARN=1 ERROR=1</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara>WASI stdin piping works reliably across runtimes. File access with <literal>--input</literal> requires capability grants (<literal>--dir</literal> or <literal>--mapdir</literal>) which vary by runtime implementation and may have limitations in preview1.</simpara>
+</important>
+</section>
+<section xml:id="wasi-run-with-wasmer">
+<title>Native Stdin Test for Comparison</title>
+<programlisting language="shell" linenumbering="unnumbered">$ echo -e "INFO startup\nERROR failed\nWARN retry\nINFO success" | ./zig-out/bin/log-analyzer-native</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">analyzing: stdin
+results: INFO=2 WARN=1 ERROR=1</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Both native and WASI produce identical output when reading from stdin, demonstrating true source-level portability for command-line tools.</simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="zig-build-run-steps">
+<title>Using <literal>zig build</literal> Run Steps</title>
+<simpara>The <literal>build.zig</literal> includes run step definitions for both targets. Invoke them directly:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run-native -- --input sample.log</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">analyzing: sample.log
+results: INFO=2 WARN=1 ERROR=1</programlisting>
+</para>
+</formalpara>
+<programlisting language="shell" linenumbering="unnumbered">$ echo -e "INFO test" | zig build run-wasi</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">analyzing: stdin
+results: INFO=1 WARN=0 ERROR=0</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>The <literal>run-wasi</literal> step automatically selects an installed WASI runtime (Wasmtime or Wasmer) or errors if neither is available. See the <literal>detectWasiRuntime</literal> helper in <literal>build.zig</literal>.</simpara>
+</note>
+</chapter>
+<chapter xml:id="size-comparison">
+<title>Binary Size Comparison</title>
+<simpara>WASI modules built with <literal>-OReleaseSmall</literal> produce compact artifacts:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ ls -lh zig-out/bin/log-analyzer-*</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">-rwxrwxr-x 1 user user 7.9M Nov  6 14:29 log-analyzer-native
+-rwxr--r-- 1 user user  18K Nov  6 14:29 log-analyzer-wasi.wasm</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>The <literal>.wasm</literal> module is dramatically smaller (18KB vs 7.9MB) because it omits native OS integration and relies on the host runtime for system calls, making it ideal for edge deployment or browser environments.</simpara>
+</tip>
+</chapter>
+<chapter xml:id="extending-the-project">
+<title>Extending the Project</title>
+<simpara>This template serves as a foundation for more complex CLI tools targeting WASI:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">JSON output</emphasis>: Emit structured results using <literal>std.json.stringify</literal>, enabling downstream processing by other tools (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json.zig">json.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Streaming from stdin</emphasis>: The current implementation already handles stdin efficiently by reading all content at once, suitable for logs up to 10MB with the current limit (see <link xl:href="28__filesystem-and-io.xml">28</link>).</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Multi-format support</emphasis>: Accept different log formats (JSON, syslog, custom) and detect them automatically based on content patterns.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">HTTP frontend</emphasis>: Package the WASI module for use in a serverless function that accepts logs via POST and returns JSON summaries (see <link xl:href="31__networking-http-and-json.xml">31</link>).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>WASI preview1 (current snapshot) lacks networking, threading, and has limited filesystem features. Stdin/stdout work reliably, but file access requires runtime-specific capability grants.</simpara>
+</listitem>
+<listitem>
+<simpara>The <literal>zig libc</literal> effort introduced in 0.15.2 shares implementation between musl and wasi-libc, improving consistency and enabling features like <literal>readToEndAlloc</literal> to work identically across platforms.</simpara>
+</listitem>
+<listitem>
+<simpara>WASI runtimes vary in their permission model. Wasmer&#8217;s <literal>--mapdir</literal> had issues in testing, while stdin piping works universally. Design CLI tools to prefer stdin when targeting WASI.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Add a <literal>--format json</literal> flag that emits <literal>{"info": N, "warn": N, "error": N}</literal> instead of the plaintext summary, then validate the output by piping to <literal>jq</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Extend <literal>analysis.zig</literal> with a unit test that verifies case-insensitive matching (e.g., "info" and "INFO" both count), demonstrating <literal>std.ascii.eqlIgnoreCase</literal> (see <link xl:href="13__testing-and-leak-detection.xml">13</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Create a third build target for <literal>wasm32-freestanding</literal> (no WASI) that exposes the analyzer as an exported function callable from JavaScript via <literal>@export</literal> (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/wasm.zig">wasm.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Benchmark native vs WASI execution time with a large log file (generate 100k lines), comparing startup overhead and throughput (see <link xl:href="40__profiling-optimization-hardening.xml">40</link>).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, Alternatives, Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>If you need threading, WASI preview2 (component model) introduces experimental concurrency primitives. Consult upstream WASI specs for migration paths.</simpara>
+</listitem>
+<listitem>
+<simpara>For browser targets, switch to <literal>wasm32-freestanding</literal> and use JavaScript interop (<literal>@export</literal>/<literal>@extern</literal>) instead of WASI syscalls (see <link xl:href="33__c-interop-import-export-abi.xml">33</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Some WASI runtimes (e.g., Wasmedge) support non-standard extensions like sockets or GPU access. Stick to preview1 for maximum portability, or document runtime-specific dependencies clearly.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

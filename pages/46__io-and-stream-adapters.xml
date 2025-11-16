@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>I/O and Stream Adapters</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>The previous chapter focused on formatting and text, while other chapters introduced basic printing with simple buffered output. This chapter dives into Zig 0.15.2&#8217;s streaming primitives: the modern <literal>std.Io.Reader</literal> / <literal>std.Io.Writer</literal> interfaces and their supporting adapters (limited views, discarding, duplication, simple counting). These abstractions intentionally expose buffer internals so performance-critical paths (formatting, delimiter scanning, hashing) remain deterministic and allocation-free. Unlike opaque I/O layers found in other languages, Zig&#8217;s adapters are ultra-thin—often plain structs whose methods manipulate explicit slices and indices. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/Writer.zig">Writer.zig</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/Reader.zig">Reader.zig</link></simpara>
+<simpara>You will learn how to create fixed in-memory writers, migrate legacy <literal>std.io.fixedBufferStream</literal> usage, cap reads with <literal>limited</literal>, duplicate an input stream (tee), discard output efficiently, and assemble pipelines (e.g., delimiter processing) without hidden allocations. Each example is small, self-contained, and demonstrates a single concept you can reuse when connecting to files, sockets, or future async abstractions.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Construct fixed-buffer writers/readers with <literal>Writer.fixed</literal> / <literal>Reader.fixed</literal> and inspect buffered data.</simpara>
+</listitem>
+<listitem>
+<simpara>Migrate from legacy <literal>std.io.fixedBufferStream</literal> to the newer APIs safely.<link xl:href="44__collections-and-algorithms.xml">44</link></simpara>
+</listitem>
+<listitem>
+<simpara>Enforce byte limits using <literal>Reader.limited</literal> to guard parsers against runaway inputs.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/Reader/Limited.zig">Limited.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Implement duplication (tee) and discard patterns without extra allocations.<link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</listitem>
+<listitem>
+<simpara>Stream delimiter-separated data using <literal>takeDelimiter</literal> / related helpers for line processing.</simpara>
+</listitem>
+<listitem>
+<simpara>Reason about when buffered vs. direct streaming is chosen and its performance implications.<link xl:href="39__performance-and-inlining.xml">39</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="fundamentals">
+<title>Fundamentals: Fixed Writers &amp; Readers</title>
+<simpara>The cornerstone abstractions are value types representing the state of a stream endpoint. A fixed writer buffers bytes until either full or flushed. A fixed reader exposes slices of its buffered region and offers peek/take semantics, facilitating incremental parsing without copying.<link xl:href="03__data-fundamentals.xml">3</link></simpara>
+<section xml:id="fixed-writer-basic">
+<title>Basic Fixed Writer (<literal>Writer.fixed</literal>)</title>
+<simpara>Create an in-memory writer, emit formatted content, then inspect and forward the buffered slice. This mirrors earlier formatting patterns but without allocating an <literal>ArrayList</literal> or dealing with dynamic capacity.<link xl:href="45__text-formatting-and-unicode.xml">45</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 46__io-and-stream-adapters.adoc - include::example$chapters-data/code/46__io-and-stream-adapters/reader_writer_basics.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run reader_writer_basics.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Header: I/O adapters
+Value A: 42
+Value B: deadbeef</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>The buffer is user-owned; you decide its lifetime and size budget. No implicit heap allocation occurs—critical for tight loops or embedded targets.</simpara>
+</tip>
+</section>
+<section xml:id="legacy-migration">
+<title>Migrating from <literal>std.io.fixedBufferStream</literal></title>
+<simpara>Legacy <literal>fixedBufferStream</literal> (lowercase <literal>io</literal>) returns wrapper types with <literal>reader()</literal> / <literal>writer()</literal> methods. Zig 0.15.2 retains them for compatibility but prefers <literal>std.Io.Writer.fixed</literal> / <literal>Reader.fixed</literal> for uniform adapter composition.<link xl:href="01__boot-basics.xml">1</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/fixed_buffer_stream.zig">fixed_buffer_stream.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 46__io-and-stream-adapters.adoc - include::example$chapters-data/code/46__io-and-stream-adapters/fixed_buffer_stream.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run fixed_buffer_stream.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Legacy buffered writer example: answer 42
+Capacity used: 42/64</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Prefer the new capital <literal>Io</literal> APIs for future interoperability; <literal>fixedBufferStream</literal> may eventually phase out as more adapters target the modern interfaces.</simpara>
+</note>
+</section>
+<section xml:id="limited-reader">
+<title>Limiting Input (<literal>Reader.limited</literal>)</title>
+<simpara>Wrap a reader with a hard cap to defend against oversized inputs (e.g., header sections, magic prefixes). Once the limit exhausts, subsequent reads indicate end of stream early, protecting downstream logic.<link xl:href="04__errors-resource-cleanup.xml">4</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 46__io-and-stream-adapters.adoc - include::example$chapters-data/code/46__io-and-stream-adapters/limited_reader.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run limited_reader.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Hello</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Use <literal>limited(.limited(N), tmp_buffer)</literal> for protocol guards; parsing functions can assume bounded consumption and bail out cleanly on premature end.<link xl:href="33__c-interop-import-export-abi.xml">33</link></simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="adapters">
+<title>Adapters &amp; Patterns</title>
+<simpara>Higher-level behaviors (counting, tee, discard, delimiter streaming) emerge from simple loops over <literal>buffered()</literal> and small helper functions rather than heavy inheritance or trait chains.<link xl:href="39__performance-and-inlining.xml">39</link></simpara>
+<section xml:id="counting">
+<title>Counting Bytes (Buffered Length)</title>
+<simpara>For many scenarios, you only need the number of bytes produced so far—reading the writer&#8217;s current buffered slice length suffices, avoiding a dedicated counting adapter.<link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 46__io-and-stream-adapters.adoc - include::example$chapters-data/code/46__io-and-stream-adapters/counting_writer.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run counting_writer.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Total bytes logically written: 29</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>For streaming sinks where buffer length resets after flush, integrate a custom <literal>update</literal> function (see hashing writer design) to accumulate totals across flush boundaries.</simpara>
+</note>
+</section>
+<section xml:id="discarding">
+<title>Discarding Output (<literal>Writer.consumeAll</literal>)</title>
+<simpara>Benchmarks and dry-runs often need to measure formatting or transformation cost without retaining the result. Consuming the buffer zeros its length; subsequent writes continue normally.<link xl:href="45__text-formatting-and-unicode.xml">45</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 46__io-and-stream-adapters.adoc - include::example$chapters-data/code/46__io-and-stream-adapters/discarding_writer.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run discarding_writer.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Buffer after consumeAll length: 0</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>consumeAll</literal> is a structural no-allocation operation; it simply adjusts <literal>end</literal> and (if needed) shifts remaining bytes. Cheap enough for tight inner loops.</simpara>
+</tip>
+</section>
+<section xml:id="tee">
+<title>Tee / Duplication</title>
+<simpara>Duplicating a stream ("teeing") can be built manually: peek, write to both targets, toss. This avoids intermediary heap buffers and works for finite or pipelined inputs.<link xl:href="28__filesystem-and-io.xml">28</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 46__io-and-stream-adapters.adoc - include::example$chapters-data/code/46__io-and-stream-adapters/tee_stream.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run tee_stream.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">A: tee me please
+B: tee me please</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara>Always <literal>peekGreedy(1)</literal> (or appropriate size) before writing; failing to ensure buffered content can cause needless underlying reads or premature termination.<link xl:href="44__collections-and-algorithms.xml">44</link></simpara>
+</important>
+</section>
+<section xml:id="delimiter-stream">
+<title>Delimiter Streaming Pipeline</title>
+<simpara>Line- or record-based protocols benefit from <literal>takeDelimiter</literal>, which returns slices excluding the delimiter. Loop until <literal>null</literal> to process all logical lines without copying or allocation.<link xl:href="31__networking-http-and-json.xml">31</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 46__io-and-stream-adapters.adoc - include::example$chapters-data/code/46__io-and-stream-adapters/stream_pipeline.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run stream_pipeline.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Line(5): alpha
+Line(4): beta
+Line(5): gamma</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara><literal>takeDelimiter</literal> yields <literal>null</literal> after the final segment—even if the underlying data ends with a delimiter—allowing simple termination checks without extra state.<link xl:href="04__errors-resource-cleanup.xml">4</link></simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Fixed buffers are finite: exceeding capacity triggers writes that may fail—choose sizes based on worst-case formatted output.<link xl:href="45__text-formatting-and-unicode.xml">45</link></simpara>
+</listitem>
+<listitem>
+<simpara><literal>limited</literal> enforces a hard ceiling; any remainder of the original stream remains unread (preventing over-read vulnerabilities).</simpara>
+</listitem>
+<listitem>
+<simpara>Delimiter streaming requires nonzero buffer capacity; extremely tiny buffers can degrade performance due to frequent underlying reads.<link xl:href="39__performance-and-inlining.xml">39</link></simpara>
+</listitem>
+<listitem>
+<simpara>Mixing legacy <literal>std.io.fixedBufferStream</literal> and new <literal>std.Io.*</literal> is safe, but prefer consistency for future maintenance.</simpara>
+</listitem>
+<listitem>
+<simpara>Counting via <literal>buffered().len</literal> excludes flushed data—use a persistent accumulator if you flush mid-pipeline.<link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Implement a simple line counter that aborts if any single line exceeds 256 bytes using <literal>limited</literal> wrappers.<link xl:href="04__errors-resource-cleanup.xml">4</link></simpara>
+</listitem>
+<listitem>
+<simpara>Build a tee that also computes a SHA-256 hash of all streamed bytes using <literal>Hasher.update</literal> from the hashing writer adapter.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/crypto/sha2.zig">sha2.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Write a delimiter + limit based reader that extracts only the first M CSV fields from large records without reading the entire line.<link xl:href="44__collections-and-algorithms.xml">44</link></simpara>
+</listitem>
+<listitem>
+<simpara>Extend the counting example to track both logical (post-format) and raw content length when using <literal>{any}</literal> formatting.<link xl:href="45__text-formatting-and-unicode.xml">45</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, Alternatives, Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Zero-capacity writers are legal but will immediately force drains—avoid for performance unless intentionally testing error paths.</simpara>
+</listitem>
+<listitem>
+<simpara>A tee loop that copies very large buffered chunks may monopolize cache; consider chunking for huge streams to improve locality.<link xl:href="39__performance-and-inlining.xml">39</link></simpara>
+</listitem>
+<listitem>
+<simpara><literal>takeDelimiter</literal> treats end-of-stream similarly to a delimiter; if you must distinguish trailing empty segments, track whether the last byte processed was the delimiter.<link xl:href="31__networking-http-and-json.xml">31</link></simpara>
+</listitem>
+<listitem>
+<simpara>Direct mixing with filesystem APIs (Chapter 28) introduces platform-specific buffering; re-validate limits when wrapping OS file descriptors.<link xl:href="28__filesystem-and-io.xml">28</link></simpara>
+</listitem>
+<listitem>
+<simpara>If future async I/O introduces suspend points, adapters that rely on tight peek/toss loops must ensure invariants across yields—document assumptions early.<link xl:href="17__generic-apis-and-type-erasure.xml">17</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

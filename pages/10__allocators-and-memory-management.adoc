@@ -1,0 +1,356 @@
+////
+changes: ["Initial draft for Allocators & Memory Management"]
+examples_compile: yes
+keywords: ["allocator", "arena", "gpa", "fixed-buffer", "memory"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "11__project-dynamic-string-builder"
+open_questions: []
+previous_chapter: "09__project-hexdump"
+status: draft
+xref_complete: true
+////
+
+= Allocators & Memory Management
+:chapter-number: 10
+:chapter-slug: allocators-and-memory-management
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Zig's approach to dynamic memory is explicit, composable, and testable. Rather than hiding allocation behind implicit globals, APIs accept a `std.mem.Allocator` and return ownership clearly to their caller. This chapter shows the core allocator interface (`alloc`, `free`, `realloc`, `resize`, `create`, `destroy`), introduces the most common allocator implementations (page allocator, Debug/GPA with leak detection, arenas, and fixed buffers), and establishes patterns for passing allocators through your own APIs (see link:https://github.com/ziglang/zig/tree/master/lib/std/mem/Allocator.zig[Allocator.zig] and link:https://github.com/ziglang/zig/tree/master/lib/std/heap.zig[heap.zig]).
+
+You'll learn when to prefer bulk-free arenas, how to use a fixed stack buffer to eliminate heap traffic, and how to grow and shrink allocations safely. These skills underpin the rest of the book—from collections to I/O adapters—and will make the later projects both faster and more robust (see xref:03__data-fundamentals.adoc[03]).
+
+[[learning-goals]]
+== Learning Goals
+
+* Use `std.mem.Allocator` to allocate, free, and resize typed slices and single items.
+* Choose an allocator: page allocator, Debug/GPA (leak detection), arena, fixed buffer, or a stack-fallback composition.
+* Design functions that accept an allocator and return owned memory to the caller (see xref:08__user-types-structs-enums-unions.adoc[08]).
+
+[[interface]]
+== The Allocator Interface
+
+Zig's allocator is a small, value-type interface with methods for typed allocation and explicit deallocation. The wrappers handle sentinels and alignment so you can stay at the `[]T` level most of the time.
+
+[[interface-basics]]
+=== alloc/free, create/destroy, and sentinels
+
+The essentials: allocate a typed slice, mutate its elements, then free. For single items, prefer `create`/`destroy`. Use `allocSentinel` (or `dupeZ`) when you need a null terminator for C interop.
+
+[source,zig]
+----
+
+include::{sourcedir}/10__allocators-and-memory-management/alloc_free_basics.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run alloc_free_basics.zig
+----
+
+.Output
+[source,shell]
+----
+buf: abcde
+point: (x=7, y=-3)
+zstr: hello
+----
+
+TIP: Prefer `{s}` to print `[]const u8` slices (no terminator required). Use `allocSentinel` or `dupeZ` when interoperating with APIs that require a trailing `\0`.
+
+[[allocator-vtable]]
+==== How the Allocator Interface Works Under the Hood
+
+The `std.mem.Allocator` type is a type-erased interface using a pointer and vtable. This design allows any allocator implementation to be passed through the same interface, enabling runtime polymorphism without virtual dispatch overhead for the common case.
+
+[mermaid]
+....
+graph TB
+    ALLOC["Allocator"]
+    PTR["ptr: *anyopaque"]
+    VTABLE["vtable: *VTable"]
+
+    ALLOC --> PTR
+    ALLOC --> VTABLE
+
+    subgraph "VTable Functions"
+        ALLOCFN["alloc(*anyopaque, len, alignment, ret_addr)"]
+        RESIZEFN["resize(*anyopaque, memory, alignment, new_len, ret_addr)"]
+        REMAPFN["remap(*anyopaque, memory, alignment, new_len, ret_addr)"]
+        FREEFN["free(*anyopaque, memory, alignment, ret_addr)"]
+    end
+
+    VTABLE --> ALLOCFN
+    VTABLE --> RESIZEFN
+    VTABLE --> REMAPFN
+    VTABLE --> FREEFN
+
+    subgraph "High-Level API"
+        CREATE["create(T)"]
+        DESTROY["destroy(ptr)"]
+        ALLOCAPI["alloc(T, n)"]
+        FREE["free(slice)"]
+        REALLOC["realloc(slice, new_len)"]
+    end
+
+    ALLOC --> CREATE
+    ALLOC --> DESTROY
+    ALLOC --> ALLOCAPI
+    ALLOC --> FREE
+    ALLOC --> REALLOC
+....
+
+The vtable contains four fundamental operations:
+
+* *alloc*: Returns a pointer to `len` bytes with specified alignment, or error on failure
+* *resize*: Attempts to expand or shrink memory in place, returns `bool`
+* *remap*: Attempts to expand or shrink memory, allowing relocation (used by `realloc`)
+* *free*: Frees and invalidates a region of memory
+
+The high-level API (`create`, `destroy`, `alloc`, `free`, `realloc`) wraps these vtable functions with type-safe, ergonomic methods. This two-layer design keeps allocator implementations simple while providing convenient typed allocation to users (see link:https://github.com/ziglang/zig/blob/master/lib/std/mem/Allocator.zig[Allocator.zig]).
+
+[[gpa-arena]]
+=== Debug/GPA and Arena Allocators
+
+For whole-program work, a Debug/GPA is the default: it tracks allocations and reports leaks at `deinit()`. For scoped, scratch allocations, an arena returns everything in one shot during `deinit()`.
+
+[source,zig]
+----
+
+include::{sourcedir}/10__allocators-and-memory-management/gpa_arena.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run gpa_arena.zig
+----
+
+.Output
+[source,shell]
+----
+gpa sum: 10
+arena msg len: 31
+----
+
+NOTE: In Zig 0.15.x, `std.heap.GeneralPurposeAllocator` is a thin alias to the Debug allocator. Always check the return of `deinit()`: `.leak` indicates something wasn't freed.
+
+[[composition]]
+== Choosing and Composing Allocators
+
+Allocators are regular values: you can pass them, wrap them, and compose them. Two workhorse tools are the fixed buffer allocator (for stack-backed bursts of allocations) and `realloc`/`resize` for dynamic growth and shrinkage.
+
+[[allocator-wrapping]]
+=== Wrapping Allocators for Safety and Debugging
+
+Because allocators are just values with a common interface, you can *wrap* one allocator to add functionality. The `std.mem.validationWrap` function demonstrates this pattern by adding safety checks before delegating to an underlying allocator.
+
+[mermaid]
+....
+graph TB
+    VA["ValidationAllocator(T)"]
+    UNDERLYING["underlying_allocator: T"]
+
+    VA --> UNDERLYING
+
+    subgraph "Validation Checks"
+        CHECK1["Assert n > 0 in alloc"]
+        CHECK2["Assert alignment is correct"]
+        CHECK3["Assert buf.len > 0 in resize/free"]
+    end
+
+    VA --> CHECK1
+    VA --> CHECK2
+    VA --> CHECK3
+
+    UNDERLYING_PTR["getUnderlyingAllocatorPtr()"]
+    VA --> UNDERLYING_PTR
+....
+
+The `ValidationAllocator` wrapper validates that:
+
+* Allocation sizes are greater than zero
+* Returned pointers have correct alignment  
+* Memory lengths are valid in resize/free operations
+
+TIP: **This pattern is powerful:** you can build custom allocator wrappers that add logging, metrics collection, memory limits, or other cross-cutting concerns without modifying the underlying allocator. The wrapper simply delegates to `underlying_allocator` after performing its checks or side effects. link:https://github.com/ziglang/zig/blob/master/lib/std/mem.zig[mem.zig]
+
+[[fixed-buffer]]
+=== Fixed buffer on the stack
+
+Use a `FixedBufferAllocator` to get fast, zero-syscall allocations from a stack array. When you run out, you'll get `error.OutOfMemory`—exactly the signal you need to fall back or trim inputs.
+
+[source,zig]
+----
+
+include::{sourcedir}/10__allocators-and-memory-management/fixed_buffer.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run fixed_buffer.zig
+----
+
+.Output
+[source,shell]
+----
+fixed buffer OOM as expected
+----
+
+TIP: For a graceful fallback, compose a fixed buffer over a slower allocator with `std.heap.stackFallback(N, fallback)`. The returned object has a `.get()` method that yields a fresh `Allocator` each time.
+
+[[resize-realloc]]
+=== Growing and shrinking safely with realloc/resize
+
+`realloc` returns a new slice (and may move the allocation). `resize` attempts to change length in place and returns `bool`; remember to also update your slice’s `len` when it succeeds.
+
+[source,zig]
+----
+
+include::{sourcedir}/10__allocators-and-memory-management/resize_and_realloc.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run resize_and_realloc.zig
+----
+
+.Output
+[source,shell]
+----
+len=4 contents=ABCD
+grown len=8 contents=ABCDabcd
+shrunk (realloc) len=3 contents=ABC
+----
+
+WARNING: After `resize(buf, n) == true`, the old `buf` still has its previous `len`. Re-slice it (`buf = buf[0..n]`) so downstream code sees the new length.
+
+[[alignment-system]]
+==== How Alignment Works Under the Hood
+
+Zig's memory system uses a compact power-of-two alignment representation. The `std.mem.Alignment` enum stores alignment as a log₂ value, allowing efficient storage while providing rich utility methods.
+
+[mermaid]
+....
+graph LR
+    ALIGNMENT["Alignment enum"]
+
+    subgraph "Alignment Values"
+        A1["@'1' = 0"]
+        A2["@'2' = 1"]
+        A4["@'4' = 2"]
+        A8["@'8' = 3"]
+        A16["@'16' = 4"]
+    end
+
+    ALIGNMENT --> A1
+    ALIGNMENT --> A2
+    ALIGNMENT --> A4
+    ALIGNMENT --> A8
+    ALIGNMENT --> A16
+
+    subgraph "Key Methods"
+        TOBYTES["toByteUnits() -> usize"]
+        FROMBYTES["fromByteUnits(n) -> Alignment"]
+        OF["of(T) -> Alignment"]
+        FORWARD["forward(address) -> usize"]
+        BACKWARD["backward(address) -> usize"]
+        CHECK["check(address) -> bool"]
+    end
+
+    ALIGNMENT --> TOBYTES
+    ALIGNMENT --> FROMBYTES
+    ALIGNMENT --> OF
+    ALIGNMENT --> FORWARD
+    ALIGNMENT --> BACKWARD
+    ALIGNMENT --> CHECK
+....
+
+This compact representation provides utility methods for:
+
+* *Converting to/from byte units*: `@"16".toByteUnits()` returns `16`, `fromByteUnits(16)` returns `@"16"`
+* *Aligning addresses forward*: `forward(addr)` rounds up to next aligned boundary
+* *Aligning addresses backward*: `backward(addr)` rounds down to previous aligned boundary  
+* *Checking alignment*: `check(addr)` returns `true` if address meets alignment requirement
+* *Type alignment*: `of(T)` returns the alignment of type `T`
+
+When you see `alignedAlloc(T, .@"16", n)` or use alignment in custom allocators, you're working with this log₂ representation. The compact storage allows Zig to track alignment efficiently without wasting space (see link:https://github.com/ziglang/zig/blob/master/lib/std/mem.zig[mem.zig]).
+
+[[allocator-param]]
+=== Allocator-as-parameter pattern
+
+Your APIs should accept an allocator and return owned memory to the caller. This keeps lifetimes explicit and lets your users pick the right allocator for their context (arena for scratch, GPA for general use, fixed buffer when available).
+
+[source,zig]
+----
+
+include::{sourcedir}/10__allocators-and-memory-management/allocator_parameter.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run allocator_parameter.zig
+----
+
+.Output
+[source,shell]
+----
+gpa: zig-likes-allocators
+fba: OOM as expected
+----
+
+NOTE: Returning `[]u8` (or `[]T`) shifts ownership cleanly to the caller; document that the caller must `free`. When you can, offer a `comptime`-friendly variant that writes into a caller-provided buffer. xref:04__errors-resource-cleanup.adoc[04]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Free what you allocate. In this book, examples use `defer allocator.free(buf)` immediately after a successful `alloc`.
+* Shrinking: prefer `resize` for in-place shrink; fall back to `realloc` if it returns `false`.
+* Arenas: never return arena-owned memory to long-lived callers. Arena memory dies at `deinit()`.
+* GPA/Debug: check `deinit()` and wire leak detection into tests with `std.testing` (see link:https://github.com/ziglang/zig/tree/master/lib/std/testing.zig[testing.zig]).
+* Fixed buffers: great for bounded workloads; combine with `stackFallback` to degrade gracefully.
+
+[[exercises]]
+== Exercises
+
+* Implement `splitJoin(allocator, s: []const u8, needle: u8) ![]u8` that splits on a byte and rejoins with `'-'`. Add a variant that writes into a caller buffer.
+* Rewrite one of your earlier CLI tools to accept an allocator from `main` and plumb it through. Try `ArenaAllocator` for transient buffers. xref:06__project-grep-lite.adoc[06]
+* Wrap `FixedBufferAllocator` with `stackFallback` and show how the same function succeeds on small inputs but falls back for larger ones.
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Alignment-sensitive allocations: use `alignedAlloc(T, .@"16", n)` or typed helpers that propagate alignment.
+* Zero-sized types and zero-length slices are supported by the interface; don't special-case them.
+* C interop: when linking libc, consider `c_allocator`/`raw_c_allocator` for matching foreign allocation semantics; otherwise prefer page allocator/GPA.

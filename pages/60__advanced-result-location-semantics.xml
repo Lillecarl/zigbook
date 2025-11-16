@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Appendix F. Advanced Result Location Semantics</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Result Location Semantics (RLS) are the quiet engine that powers Zig&#8217;s zero-copy aggregates, type inference, and efficient error propagation. After experimenting with inline assembly in Appendix E, we now dive back into the compiler to see how Zig steers values directly into their final home. It eliminates temporaries whether you build structs, unions, or manually fill caller-provided buffers. <link xl:href="59__advanced-inline-assembly.xml">59</link></simpara>
+<simpara>Zig 0.15.2 clarifies RLS diagnostics around pointer alignment and optional result pointers, making it easier to reason about where your data lives during construction. <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Trace how struct literals and coercions forward result locations to every field without hidden copies.</simpara>
+</listitem>
+<listitem>
+<simpara>Apply explicit result pointers when you want to reuse caller-owned storage while still offering a value-returning API.</simpara>
+</listitem>
+<listitem>
+<simpara>Combine unions with RLS so each variant writes directly into its own payload without allocating scratch buffers at runtime.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="struct-forwarding">
+<title>Struct Forwarding in Practice</title>
+<simpara>When you assign a struct literal to a variable, Zig rewrites the operation into a series of field writes, allowing each sub-expression to inherit the final destination. The first recipe summarizes a handful of sensor readings into a <literal>Report</literal>, demonstrating how nested literals (<literal>range</literal> inside <literal>Report</literal>) inherit result locations transitively. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/math.zig">math.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 60__advanced-result-location-semantics.adoc - include::example$chapters-data/code/60__advanced-result-location-semantics/01_histogram_report.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test chapters-data/code/60__advanced-result-location-semantics/01_histogram_report.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 1 tests passed.</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Because the literal <literal>.{ .range = …, .buckets = histogram }</literal> writes field-by-field, you can safely seed <literal>histogram</literal> with <literal>var</literal> data—no temporary copy of the 16-byte array is ever produced. <link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</tip>
+</chapter>
+<chapter xml:id="manual-result-pointers">
+<title>Manual Result Pointers for Reuse</title>
+<simpara>Sometimes you want both worlds: a value-returning helper for ergonomic callers and an in-place variant for hot loops that reuse storage. By exposing a <literal>parseInto</literal> routine that receives a <literal>*Numbers</literal>, you determine the result location explicitly while still offering <literal>parseNumbers</literal> that benefits from automatic elision. <link xl:href="04__errors-resource-cleanup.xml">4</link> Note how the slice method accepts <literal>*const Numbers</literal>; returning a slice from a by-value parameter would point at a temporary and violate safety rules. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/mem.zig">mem.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 60__advanced-result-location-semantics.adoc - include::example$chapters-data/code/60__advanced-result-location-semantics/02_numbers_parse_into.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test chapters-data/code/60__advanced-result-location-semantics/02_numbers_parse_into.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Resetting <literal>Numbers</literal> with a fresh value and zeroing the backing array ensures the result location is ready for reuse even if the previous parse only filled part of the buffer. <link xl:href="57__error-handling-patterns-cookbook.xml">57</link></simpara>
+</note>
+</chapter>
+<chapter xml:id="union-forwarding">
+<title>Union Variants and Branch-Specific Destinations</title>
+<simpara>Unions expose the same mechanics: once the compiler knows which variant you are constructing, it wires the payload&#8217;s result location to the appropriate field. The lookup helper below either streams bytes into a <literal>Resource</literal> payload or returns metadata for malformed queries, without allocating interim buffers. The same approach scales to streaming parsers, FFI bridges, or caches that must avoid heap traffic.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 60__advanced-result-location-semantics.adoc - include::example$chapters-data/code/60__advanced-result-location-semantics/03_union_forwarding.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test chapters-data/code/60__advanced-result-location-semantics/03_union_forwarding.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<caution>
+<simpara>When copying into fixed-size buffers, clamp the length as shown, so you do not accidentally write past the payload. If you require full-length retention, switch to a slice field and pair it with lifetimes that outlive the union value. <link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</caution>
+</chapter>
+<chapter xml:id="patterns">
+<title>Patterns to Keep on Hand</title>
+<itemizedlist>
+<listitem>
+<simpara>Treat <literal>return .{ … };</literal> as sugar for field-wise writes—the compiler already knows the destination, so lean on literals for clarity. <link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara>Offer pointer-based <literal>*_into</literal> variants when parsing or formatting—they turn RLS into a conscious API lever instead of an implicit optimization. <link xl:href="04__errors-resource-cleanup.xml">4</link></simpara>
+</listitem>
+<listitem>
+<simpara>When unions carry large payloads, construct them inline so variants do not require heap allocations or temporary buffers. <link xl:href="08__user-types-structs-enums-unions.xml">8</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Return slices from by-value methods (like <literal>fn slice(self: Numbers)</literal>) capture a temporary copy; prefer pointer receivers to keep the result location stable.</simpara>
+</listitem>
+<listitem>
+<simpara>Many standard-library builders accept result pointers—read their signatures before re-implementing similar plumbing yourself. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig">fmt.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>RLS bypasses no validation: if a sub-expression fails (for example, parsing errors), the partially written destination remains in your control, so remember to reset or discard it before reuse. <link xl:href="57__error-handling-patterns-cookbook.xml">57</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>buildReport</literal> to parameterize the bucket size, then inspect how nested loops still forward their destinations without copies. <link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara>Add overflow detection to <literal>parseInto</literal>, so it rejects integers above a configurable limit, resetting the result buffer when the error fires. <link xl:href="57__error-handling-patterns-cookbook.xml">57</link></simpara>
+</listitem>
+<listitem>
+<simpara>Teach <literal>lookup</literal> to stream into a caller-provided scratch buffer when the payload exceeds 32 bytes, mirroring the pointer-based pattern from the previous section. <link xl:href="04__errors-resource-cleanup.xml">4</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>For <literal>comptime</literal> constructs, result locations may exist entirely in compile-time memory; use <literal>@TypeOf</literal> to confirm whether your data ever escapes to runtime. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+<listitem>
+<simpara>When interfacing with C APIs that expect you to manage buffers, combine RLS with <literal>extern</literal> structs, so you match their layout while still avoiding intermediate copies. <link xl:href="33__c-interop-import-export-abi.xml">33</link></simpara>
+</listitem>
+<listitem>
+<simpara>Profile hot paths before micro-optimizing: sometimes using <literal>std.ArrayList</literal> or a streaming writer is clearer, and RLS will still erase intermediate temporaries for you. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/array_list.zig">array_list.zig</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

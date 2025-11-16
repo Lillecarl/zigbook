@@ -1,0 +1,290 @@
+////
+changes: ["Initial GPU fundamentals chapter"]
+examples_compile: yes
+keywords: ["gpu", "spirv", "vulkan"]
+last_updated: 2025-11-05
+last_verified: 2025-11-05
+next_chapter: "35__project-gpu-compute-in-zig"
+open_questions: []
+previous_chapter: "33__c-interop-import-export-abi"
+status: draft
+xref_complete: true
+////
+
+= GPU Fundamentals
+:chapter-number: 34
+:chapter-slug: gpu-fundamentals
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+The C interop bridge from the previous chapter lets Zig speak to decades of native code (see xref:33__c-interop-import-export-abi.adoc[33]); the next frontier is harnessing massively parallel devices without abandoning Zig's ergonomics. We will map GPU execution models onto Zig's language primitives, examine how address spaces and calling conventions constrain kernel code, and learn the build flags that tame the still-evolving SPIR-V toolchain (see link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]).
+
+Along the way, we will contrast compute-first design with graphics pipelines, highlight where Zig's standard library already understands GPU targets, and outline pragmatic host/device coordination patterns for projects that still need to run on pure CPU hardware (see link:https://github.com/ziglang/zig/tree/master/lib/std/Target.zig[Target.zig]).
+
+[[learning-goals]]
+== Learning Goals
+
+* Relate Zig's compilation model to GPU execution hierarchies and memory classes.
+* Declare and compile GPU kernels with explicit calling conventions and address spaces.
+* Plan launch parameters that gracefully degrade to CPU fallbacks when accelerators are absent.
+
+See link:https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig[builtin.zig] and link:https://github.com/ziglang/zig/tree/master/lib/std/math.zig[math.zig] for related definitions.
+
+[[gpu-architecture-foundations]]
+== GPU Architecture Foundations
+
+GPUs expose thousands of lightweight threads arranged into hierarchies of work items, work groups, and grids; Zig surfaces those indices through builtins like `@workGroupId`, `@workGroupSize`, and `@workItemId`, keeping the model explicit so kernels remain predictable. Because GPU compilers penalize implicit global state, Zig's bias toward explicit parameters and result locations naturally fits the deterministic flow demanded by SIMT hardware.
+
+[[simt-execution-model]]
+=== Execution model: SIMT and thread groups
+
+Single-instruction, multiple-thread (SIMT) execution bundles lanes into warps or wavefronts that run the same opcode stream until divergence. When you compile for targets such as `.spirv32`, `.spirv64`, `.nvptx`, or `.amdgcn`, Zig swaps its default calling convention for specialized GPU variants, so `callconv(.kernel)` emits code that satisfies each platform's scheduler expectations. Divergence is handled explicitly: branching on per-lane values results in predicate masks that stall inactive threads, so structuring kernels with coarse branching keeps throughput predictable.
+
+[[memory-hierarchy-address-spaces]]
+=== Memory hierarchies and address spaces
+
+Zig models GPU memories through first-class address spaces — `.global`, `.shared`, `.local`, `.constant`, `.storage_buffer`, and more — each with its own coherence and lifetime rules. The compiler refuses pointer arithmetic that crosses into disallowed spaces, forcing kernel authors to acknowledge when data lives in shared memory versus device-global buffers. Use explicit casts like `@addrSpaceCast` only when you can prove the access rules remain valid, and prefer `extern struct` payloads for data shared with host APIs to guarantee layout stability.
+
+[[compute-vs-graphics]]
+=== Compute vs graphics pipelines
+
+Compute kernels are just SPIR-V or PTX entry points that you enqueue from host code; graphics shaders traverse a fixed pipeline that Zig currently treats as external binaries you author in shading languages or translated SPIR-V blobs. Zig's `@import` system does not yet generate render pipelines, but you can embed precompiled SPIR-V and dispatch it through Vulkan or WebGPU hosts written in Zig, integrating with the same allocator and error handling discipline you rely on elsewhere in the standard library. 
+
+[[targeting-gpus-with-zig]]
+== Targeting GPUs with Zig
+
+The compiler's view of a build is captured by `builtin.target`, which records the architecture, OS tag, ABI, and permitted address spaces; toggling `-target` at the CLI level is enough to retarget code for host CPUs, SPIR-V, or CUDA backends. Zig 0.15.2 ships both the self-hosted SPIR-V backend and an LLVM-based fallback selectable with `-fllvm`, letting you experiment with whichever pipeline better matches your downstream drivers.
+
+=== Understanding the Target Structure
+
+Before working with GPU-specific compilation, it's valuable to understand how Zig represents compilation targets internally. The following diagram shows the complete `std.Target` structure:
+
+[mermaid]
+....
+graph TB
+    subgraph "std.Target Structure"
+        TARGET["std.Target"]
+        CPU["cpu: Cpu"]
+        OS["os: Os"]
+        ABI["abi: Abi"]
+        OFMT["ofmt: ObjectFormat"]
+        DYNLINKER["dynamic_linker: DynamicLinker"]
+
+        TARGET --> CPU
+        TARGET --> OS
+        TARGET --> ABI
+        TARGET --> OFMT
+        TARGET --> DYNLINKER
+    end
+
+    subgraph "Cpu Components"
+        CPU --> ARCH["arch: Cpu.Arch"]
+        CPU --> MODEL["model: *const Cpu.Model"]
+        CPU --> FEATURES["features: Feature.Set"]
+
+        ARCH --> ARCHEX["x86_64, aarch64, wasm32, etc"]
+        MODEL --> MODELEX["generic, native, specific variants"]
+        FEATURES --> FEATEX["CPU feature flags"]
+    end
+
+    subgraph "Os Components"
+        OS --> OSTAG["tag: Os.Tag"]
+        OS --> VERSION["version_range: VersionRange"]
+
+        OSTAG --> OSEX["linux, windows, macos, wasi, etc"]
+        VERSION --> VERUNION["linux: LinuxVersionRange<br/>windows: WindowsVersion.Range<br/>semver: SemanticVersion.Range<br/>none: void"]
+    end
+
+    subgraph "Abi and Format"
+        ABI --> ABIEX["gnu, musl, msvc, none, etc"]
+        OFMT --> OFMTEX["elf, macho, coff, wasm, c, spirv"]
+    end
+....
+
+This target structure reveals how GPU compilation integrates with Zig's type system. When you specify `-target spirv32-vulkan-none`, you're setting: CPU arch to `spirv32` (32-bit SPIR-V), OS tag to `vulkan` (Vulkan environment), ABI to `none` (freestanding, no C runtime), and implicitly ObjectFormat to `spirv`. The target fully determines code generation behavior: `builtin.target.cpu.arch.isSpirV()` returns true, address space support is enabled, and the compiler selects the SPIR-V backend instead of x86_64 or ARM code generation. This same structure handles all targets—CPU, GPU, WebAssembly, bare metal—with uniform semantics. The ObjectFormat field (`ofmt`) tells the linker which binary format to produce: `elf` for Linux executables, `macho` for Darwin, `coff` for Windows, `wasm` for WebAssembly, and `spirv` for GPU shaders. Understanding this architecture helps you decode target triples, predict which builtins are available (like `@workGroupId` on GPU targets), and troubleshoot cross-compilation issues.
+
+[[inspecting-targets]]
+=== Inspecting targets and address spaces
+
+This first example introspects the native build target, reports which GPU address spaces the compiler allows, and synthesizes a cross-compilation triple for SPIR-V. Running it on non-GPU hosts still teaches the vocabulary Zig uses to describe accelerators (see link:https://github.com/ziglang/zig/tree/master/lib/std/Target/Query.zig[Query.zig]).
+
+[source,zig]
+----
+include::{sourcedir}/34__gpu-fundamentals/01_target_introspection.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run 01_target_introspection.zig
+----
+
+.Output
+[source,shell]
+----
+host architecture: x86_64
+host operating system: linux
+default object format: elf
+compiling as GPU backend: false
+supports shared address space: false
+supports constant address space: false
+example SPIR-V triple: spirv64-vulkan-none
+----
+
+TIP: Even when the native arch is a CPU, synthesizing a SPIR-V triple helps you wire up build steps that emit GPU binaries without switching machines.
+
+[[declaring-kernels]]
+=== Declaring kernels and dispatch metadata
+
+The kernel below stores its dispatch coordinates in a storage-buffer struct, illustrating how GPU-specific calling conventions, address spaces, and builtins compose. Compiling requires a SPIR-V target and the self-hosted backend (`-fno-llvm`) so Zig emits binary modules ready for Vulkan or WebGPU queue submission.
+
+[source,zig]
+----
+include::{sourcedir}/34__gpu-fundamentals/02_spirv_fill_kernel.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig build-obj -fno-llvm -O ReleaseSmall -target spirv32-vulkan-none \
+    -femit-bin=chapters-data/code/34__gpu-fundamentals/capture_coordinates.spv \
+    chapters-data/code/34__gpu-fundamentals/02_spirv_fill_kernel.zig
+----
+
+.Output
+[source,shell]
+----
+no output (binary module generated)
+----
+
+NOTE: The emitted `.spv` blob slots directly into Vulkan's `vkCreateShaderModule` or WebGPU's `wgpuDeviceCreateShaderModule`, and the `extern struct` ensures host descriptors match the kernel's expected layout.
+
+[[toolchain-selection]]
+=== Toolchain choices and binary formats
+
+Zig's build system can register GPU artifacts via `addObject` or `addLibrary`, allowing you to tuck SPIR-V modules alongside CPU executables in a single workspace. When SPIR-V validation demands specific environments (Vulkan versus OpenCL), set the OS tag in your `-target` triple accordingly, and pin optimization modes (`-O ReleaseSmall` for shaders) to control instruction counts and register pressure (see link:https://github.com/ziglang/zig/tree/master/lib/std/build.zig[build.zig]). Fallbacks like `-fllvm` unlock vendor-specific features when the self-hosted backend trails the latest SPIR-V extensions.
+
+=== Object Formats and ABI for GPU Targets
+
+SPIR-V is a first-class object format in Zig, sitting alongside traditional executable formats. The following diagram shows how object formats and ABIs are organized:
+
+[mermaid]
+....
+graph TB
+    subgraph "Common ABIs"
+        ABI["Abi enum"]
+
+        ABI --> GNU["gnu<br/>GNU toolchain"]
+        ABI --> MUSL["musl<br/>musl libc"]
+        ABI --> MSVC["msvc<br/>Microsoft Visual C++"]
+        ABI --> NONE["none<br/>freestanding"]
+        ABI --> ANDROID["android, gnueabi, etc<br/>platform variants"]
+    end
+
+    subgraph "Object Formats"
+        OFMT["ObjectFormat enum"]
+
+        OFMT --> ELF["elf<br/>Linux, BSD"]
+        OFMT --> MACHO["macho<br/>Darwin systems"]
+        OFMT --> COFF["coff<br/>Windows PE"]
+        OFMT --> WASM["wasm<br/>WebAssembly"]
+        OFMT --> C["c<br/>C source output"]
+        OFMT --> SPIRV["spirv<br/>Shaders"]
+    end
+....
+
+GPU kernels typically use `abi = none` because they run in freestanding environments without a C runtime—no libc, no standard library initialization, just raw compute. The SPIR-V object format produces `.spv` binaries that bypass traditional linking: instead of resolving relocations and merging sections like ELF or Mach-O linkers do, SPIR-V modules are complete, self-contained shader programs ready for consumption by Vulkan's `vkCreateShaderModule` or WebGPU's shader creation APIs. This is why you don't need a separate linking step for GPU code—the compiler emits final binaries directly. When you specify `-target spirv32-vulkan-none`, the `none` ABI tells Zig to skip all C runtime setup, and the `spirv` object format ensures the output is valid SPIR-V bytecode rather than an executable with entry points and program headers.
+
+=== Code Generation Backend Architecture
+
+Zig supports multiple code generation backends, giving you flexibility in how SPIR-V is produced:
+
+[mermaid]
+....
+graph TB
+    subgraph "Code Generation"
+        CG["Code Generation"]
+        CG --> LLVM["LLVM Backend<br/>use_llvm flag"]
+        CG --> NATIVE["Native Backends<br/>x86_64, aarch64, wasm, riscv64"]
+        CG --> CBACK["C Backend<br/>ofmt == .c"]
+    end
+....
+
+The **LLVM Backend** (`-fllvm`) routes through LLVM's SPIR-V target, which supports vendor-specific extensions and newer SPIR-V versions. Use this when you need features the self-hosted backend hasn't implemented yet, or when debugging compiler issues—LLVM's mature SPIR-V support provides a known-good reference. The **Native Backends** (`-fno-llvm`, the default) use Zig's self-hosted code generation for SPIR-V, which is faster to compile and produces smaller binaries but may lag behind LLVM in extension support. For SPIR-V, the self-hosted backend emits bytecode directly without intermediate representations. The **C Backend** isn't applicable to GPU targets, but demonstrates Zig's multi-backend flexibility. When experimenting with GPU code, start with `-fno-llvm` for faster iteration; switch to `-fllvm` if you encounter missing SPIR-V features or need to compare output against a reference implementation. The choice affects compilation speed and feature availability but not the API you write—your kernel code remains identical.
+
+[[launch-planning-data-parallel]]
+== Launch Planning and Data Parallel Patterns
+
+Choosing launch sizes involves balancing GPU occupancy with shared-memory budgets, while CPU fallbacks should reuse the same arithmetic so correctness stays identical across devices. Zig's strong typing makes these calculations explicit, encouraging reusable helpers for both host planners and kernels.
+
+[[workgroup-sizing]]
+=== Choosing workgroup sizes
+
+This helper computes how many work groups you need for a problem size, how much padding the final group introduces, and models the same computation for CPU-side chunking. Using one routine eliminates off-by-one desynchronization between host and device scheduling.
+
+[source,zig]
+----
+include::{sourcedir}/34__gpu-fundamentals/03_dispatch_planner.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run 03_dispatch_planner.zig
+----
+
+.Output
+[source,shell]
+----
+gpu dispatch: 16 groups × 64 lanes => 1024 invocations (tail 24)
+cpu chunks: 63 batches × 16 lanes => 1008 logical tasks (tail 8)
+----
+
+TIP: Feed the planner's output back into both kernel launch descriptors and CPU task schedulers so instrumentation stays consistent across platforms.
+
+[[cpu-fallbacks]]
+=== CPU fallbacks and unified code paths
+
+Modern applications often ship CPU implementations for capability-limited machines; by sharing dispatch planners and `extern` payloads, you can reuse validation code that checks GPU outputs against CPU recomputations before trusting results in production. Pair this with Zig's build options (`-Dgpu=false`) to conditionally exclude kernel modules when packaging for environments without accelerators.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Always gate GPU-specific code behind feature checks so CPU-only builds still pass CI.
+* Vulkan validation layers catch many mistakes early; enable them whenever compiling SPIR-V from Zig until your kernel suite stabilizes.
+* Prefer release-small optimization for kernels: it minimizes instruction count, easing pressure on instruction caches and register files.
+
+[[exercises]]
+== Exercises
+
+* Extend the kernel to write multiple dimensions (XYZ) into the coordinate struct and verify the emitted SPIR-V with `spirv-dis`.
+* Add a CPU-side validator that maps the SPIR-V output buffer back into Zig and cross-checks runtimes against `simulateCpuFallback`.
+* Modify the build script to emit both SPIR-V and PTX variants by flipping the `-target` triple and swapping address-space annotations accordingly.
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Some GPU drivers demand specialized calling conventions (e.g., AMD's `.amdgcn.kernel`), so parameter order and types must match vendor documentation precisely.
+* `@workGroupSize` returns compile-time constants only when you mark the function `inline` and supply size literals; otherwise, assume runtime values and guard dynamic paths.
+* OpenCL targets prefer `.param` address spaces; when cross-compiling, audit every pointer parameter and adjust `addrspace` annotations to maintain correctness.

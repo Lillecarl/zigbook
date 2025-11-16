@@ -1,0 +1,150 @@
+////
+changes: ["Draft cross-language idioms appendix"]
+examples_compile: yes
+keywords: ["interop", "idioms", "porting"]
+last_updated: 2025-11-13
+last_verified: 2025-11-13
+next_chapter: "59__advanced-inline-assembly"
+open_questions: []
+previous_chapter: "57__error-handling-patterns-cookbook"
+status: draft
+xref_complete: true
+////
+
+= Appendix D. Mapping C/Rust Idioms → Zig Constructs
+:chapter-number: 58
+:chapter-slug: mapping-c-rust-idioms
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+C and Rust establish the mental models that many Zig developers bring along: manual `malloc`/`free`, RAII destructors, `Option<T>`, `Result<T, E>`, and trait objects. This appendix translates those habits into idiomatic Zig so you can port real codebases without fighting the language.
+
+Zig's tightened pointer alignment rules (`@alignCast`) and improved allocator diagnostics show up repeatedly when wrapping foreign APIs. link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
+
+[[learning-goals]]
+== Learning Goals
+
+* Swap manual resource cleanup for `defer`/`errdefer` while preserving the control you expect from C.
+* Express Rust-inspired `Option`/`Result` logic with Zig optionals and error unions in a composable way.
+* Adapt callback- or trait-based polymorphism to Zig's `comptime` generics and pointer shims.
+
+[[c-resource-lifetimes]]
+== Translating C Resource Lifetimes
+
+C programmers habitually pair every `malloc` with a matching `free`. Zig lets you encode the same intent with `errdefer` and structured error sets so buffers never leak even when validation fails. xref:04__errors-resource-cleanup.adoc[4] The following example contrasts a direct translation with a Zig-first helper that frees memory automatically, highlighting how allocator errors compose with domain errors. link:https://github.com/ziglang/zig/tree/master/lib/std/mem.zig[mem.zig]
+
+[source,zig]
+----
+include::{sourcedir}/58__mapping-c-rust-idioms/01_c_style_cleanup.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 01_c_style_cleanup.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+TIP: The explicit `NormalizeError` union tracks both allocator failures and validation failures, a pattern encouraged throughout xref:10__allocators-and-memory-management.adoc[Chapter 10's allocator tour].
+
+[[rust-option-result]]
+== Mirroring Rust's Option and Result Types
+
+Rust's `Option<T>` maps cleanly to Zig's `?T`, while `Result<T, E>` becomes an error union (`E!T`) with rich tags instead of stringly typed messages. xref:04__errors-resource-cleanup.adoc[4] This recipe pulls a configuration value from newline-separated text, first with an optional search and then with a domain-specific error union that converts parsing failures into caller-friendly diagnostics. link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig]
+
+[source,zig]
+----
+include::{sourcedir}/58__mapping-c-rust-idioms/02_rust_option_result.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 02_rust_option_result.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+NOTE: Because Zig separates optional discovery from error propagation, you can reuse `findPortLine` for fast-path checks while `parsePort` handles the slower, fallible work—mirroring the Rust pattern of splitting `Option::map` from `Result::map_err`. xref:17__generic-apis-and-type-erasure.adoc[17]
+
+[[callback-bridges]]
+== Bridging Traits and Function Pointers
+
+Both C and Rust lean on callbacks—either raw function pointers with context payloads or trait objects with explicit `self` parameters. Zig models the same abstraction with `*anyopaque` shims plus `comptime` adapters, so you keep type safety and zero-cost indirection. xref:33__c-interop-import-export-abi.adoc[33] The example below shows a C-style callback and a trait-like `handle` method reused via the same legacy bridge, relying on Zig's pointer casts and alignment assertions. link:https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig[builtin.zig]
+
+[source,zig]
+----
+include::{sourcedir}/58__mapping-c-rust-idioms/03_callback_bridge.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 03_callback_bridge.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+TIP: The additional `@alignCast` calls reflect a 0.15.2 footgun—pointer casts now assert alignment, so leave them in place when wrapping `*anyopaque` handles from C libraries. link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
+
+[[patterns]]
+== Patterns to Keep on Hand
+
+* Keep allocator cleanup localized with `errdefer` while exposing typed results, so C ports stay leak-free without sprawling `goto` blocks. xref:04__errors-resource-cleanup.adoc[4]
+* Convert foreign enums into Zig error unions early, then re-export a focused error set at your module boundary. xref:57__error-handling-patterns-cookbook.adoc[57]
+* Implement trait-style behavior with `comptime` structs that expose a small interface (`handle`, `format`, etc.), letting the optimizer inline the call sites. xref:15__comptime-and-reflection.adoc[15]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Manual allocation helpers should surface `std.mem.Allocator.Error` explicitly so callers can continue propagating failures transparently.
+* When porting Rust crates that rely on drop semantics, audit every branch for `return` or `break` expressions—Zig will not automatically invoke destructors. xref:36__style-and-best-practices.adoc[36]
+* Function-pointer shims must respect calling conventions; if the C API expects `extern fn`, annotate your shim accordingly before shipping. xref:33__c-interop-import-export-abi.adoc[33]
+
+[[exercises]]
+== Exercises
+
+* Extend the normalization helper to tolerate underscores by translating them to hyphens, and add tests covering both success and failure cases. xref:10__allocators-and-memory-management.adoc[10]
+* Modify `parsePort` to return a struct containing both host and port, then document how the combined error union expands. xref:57__error-handling-patterns-cookbook.adoc[57]
+* Generalize `dispatchWithContext` so it accepts a compile-time list of handlers, mirroring Rust's trait object vtables. xref:15__comptime-and-reflection.adoc[15]
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Some C libraries expect you to allocate with their custom functions—wrap those allocators in a shim that implements the `std.mem.Allocator` interface, so the rest of your Zig code stays uniform. xref:10__allocators-and-memory-management.adoc[10]
+* When porting Rust `Option<T>` that owns heap data, consider returning a slice plus length sentinel instead of duplicating ownership semantics. xref:03__data-fundamentals.adoc[3]
+* If your callback bridge crosses threads, add synchronization primitives from Chapter 29 before mutating shared state. xref:29__threads-and-atomics.adoc[29]

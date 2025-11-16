@@ -1,0 +1,192 @@
+////
+changes: ["New project chapter: Path Utility (TDD)", "Added demo + tests and leak catch/fix"]
+examples_compile: yes
+keywords: ["paths", "TDD", "std.testing", "filesystem", "join", "basename", "dirname", "extension"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "15__comptime-and-reflection"
+open_questions: []
+previous_chapter: "13__testing-and-leak-detection"
+status: draft
+xref_complete: true
+////
+
+= Project: Path Utility (TDD)
+:chapter-number: 14
+:chapter-slug: project-path-utility
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+In this hands-on chapter, we build a tiny, allocator-friendly path helper that plays nicely with Zig’s standard library and works across platforms. We’ll develop it test-first—then also provide a small CLI demo so you can see actual output without a test harness. Along the way, we deliberately introduce a leak and watch Zig’s testing allocator catch it, then fix it and verify.
+
+The goal is not to replace `std.fs.path`, but to practice API design, test-driven development (TDD), and leak-safe allocation in a realistic, bite-sized utility. See xref:13__testing-and-leak-detection.adoc[] and link:https://github.com/ziglang/zig/tree/master/lib/std/fs/path.zig[path.zig].
+
+[[learning-goals]]
+== Learning Goals
+
+* Design a small, composable API: join, basename/dirpath, extension, and change extension.
+* Use allocators correctly and avoid leaks under success and failure paths. xref:10__allocators-and-memory-management.adoc[]
+* Practice TDD with `std.testing`, and pair TDD with a `zig run` demo for visible output. xref:13__testing-and-leak-detection.adoc[]
+
+[[api-sketch]]
+== A small API surface
+
+We’ll implement four helpers in the `pathutil` namespace:
+
+* `joinAlloc(allocator, parts)` → `[]u8`: join components with a single separator, preserving an absolute root
+* `basename(path)` → `[]const u8`: last component, ignoring trailing separators
+* `dirpath(path)` → `[]const u8`: directory part, no trailing separators ("." for bare names, "/" for root)
+* `extname(path)` → `[]const u8` and `changeExtAlloc(allocator, path, new_ext)` → `[]u8`
+
+These functions emphasize predictable, teaching-friendly behavior; for production-grade edge cases, prefer `std.fs.path`.
+
+[source,zig]
+----
+include::{sourcedir}/14__project-path-utility-tdd/path_util.zig[]
+----
+
+NOTE: For pedagogy, we accept either `'/'` or `'\\'` as separators on any platform when parsing, but we always emit the local separator (`std.fs.path.sep`) when joining.
+
+[[demo-run]]
+== Try it: run the demo (visible output)
+
+To keep output visible outside the test runner, here’s a tiny CLI that calls our helpers and prints the results.
+
+[source,zig]
+----
+include::{sourcedir}/14__project-path-utility-tdd/path_util_demo.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run chapters-data/code/14__project-path-utility-tdd/path_util_demo.zig
+----
+
+.Output
+[source,shell]
+----
+join a,b,c => a/b/c
+join /,usr/,/bin => /usr/bin
+basename(/home/user/docs/report.txt) => report.txt
+dirpath(/home/user/docs/report.txt) => /home/user/docs
+extname(/home/user/docs/report.txt) => txt
+changeExt(/home/user/docs/report.txt, md) => /home/user/docs/report.md
+----
+
+
+
+[[tdd-loop]]
+== Test-first: codify behavior and edge cases
+
+TDD helps clarify intent and lock down edge cases. We keep tests small and fast; they run with Zig’s testing allocator, which catches leaks by default. This chapter includes tests because the content plan calls for TDD; elsewhere we’ll favor `zig run`-style demos for visible output. See xref:13__testing-and-leak-detection.adoc[] and link:https://github.com/ziglang/zig/tree/master/lib/std/testing.zig[testing.zig].
+
+[source,zig]
+----
+include::{sourcedir}/14__project-path-utility-tdd/path_util_test.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test chapters-data/code/14__project-path-utility-tdd/path_util_test.zig
+----
+
+.Output
+[source,shell]
+----
+All 3 tests passed.
+----
+
+[[leak-catch-fix]]
+== Catch a deliberate leak → fix it
+
+The testing allocator flags leaks at the end of a test. First, a failing example that forgets to `free`:
+
+[source,zig]
+----
+include::{sourcedir}/14__project-path-utility-tdd/leak_demo_fail.zig[]
+----
+
+.Run (expect failure)
+[source,shell]
+----
+$ zig test chapters-data/code/14__project-path-utility-tdd/leak_demo_fail.zig
+----
+
+.Output (excerpt)
+[listing]
+----
+[gpa] (err): memory address 0x… leaked:
+… path_util.zig:49:33: … in joinAlloc
+… leak_demo_fail.zig:6:42: … in test.deliberate leak caught by testing allocator
+
+All 1 tests passed.
+1 errors were logged.
+1 tests leaked memory.
+error: the following test command failed with exit code 1:
+…/test --seed=0x…
+----
+
+Then fix it with `defer` and watch the suite go green:
+
+[source,zig]
+----
+include::{sourcedir}/14__project-path-utility-tdd/leak_demo_fix.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test chapters-data/code/14__project-path-utility-tdd/leak_demo_fix.zig
+----
+
+.Output
+[source,shell]
+----
+All 1 tests passed.
+----
+
+xref:10__allocators-and-memory-management.adoc[], link:https://github.com/ziglang/zig/tree/master/lib/std/heap.zig[heap.zig]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* For production path handling, consult `std.fs.path` for platform nuances (UNC paths, drive letters, special roots).
+* Prefer `defer allocator.free(buf)` immediately after successful allocations; it makes success and error paths correct by construction. xref:04__errors-resource-cleanup.adoc[]
+* When you need visible output (tutorials, demos), prefer `zig run` examples; when you need guarantees (CI), prefer `zig test`. This chapter demonstrates both because it’s explicitly TDD-focused. xref:13__testing-and-leak-detection.adoc[]
+
+[[exercises]]
+== Exercises
+
+* Extend `joinAlloc` to elide `.` segments and collapse `..` pairs in the middle (be careful near the root). Add tests for edge cases, then demo with `zig run`.
+* Add `stem(path)` that returns the basename without extension; verify behavior for `.gitignore`, multi-dot names, and trailing dots.
+* Write a tiny CLI that takes `--change-ext md file1 file2 …` and prints the results, using the page allocator and a buffered writer. xref:28__filesystem-and-io.adoc[]
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* On Windows, this teaching utility treats both `'/'` and `'\\'` as separators for input, but always prints the local separator. `std.fs.path` has richer semantics if you need exact Windows behavior.
+* Allocation failure handling: the demo uses `std.heap.page_allocator` and would abort on OOM; the tests use `std.testing.allocator` to systematically catch leaks. xref:10__allocators-and-memory-management.adoc[]
+* If you embed these helpers into larger tools, thread the allocator through your APIs and keep ownership rules explicit; avoid global state. xref:36__style-and-best-practices.adoc[]

@@ -1,0 +1,675 @@
+////
+changes: ["Initial stdlib index/map chapter"]
+examples_compile: no
+keywords: ["stdlib", "standard library", "reference", "index"]
+last_updated: 2025-11-06
+last_verified: 2025-11-06
+next_chapter: "44__collections-and-algorithms"
+open_questions: []
+previous_chapter: "42__project-wasi-build-and-run"
+status: draft
+xref_complete: true
+////
+
+= Stdlib Index (Map)
+:chapter-number: 43
+:chapter-slug: stdlib-index
+:creative-commons:
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+After constructing portable applications targeting WASI and native platforms, xref:42__project-wasi-build-and-run.adoc[42] you now stand at the threshold of Zig's standard library—a curated collection of approximately 70 top-level modules and 30+ directories spanning data structures, I/O, cryptography, compression, and compiler internals. link:https://github.com/ziglang/zig/tree/master/lib/std/std.zig[std.zig]
+
+This chapter serves as your map: a navigational index that orients you within `zig/lib/std/` for version 0.15.2, showing where to find functionality and how the library categories align with the deep-dive chapters ahead.
+
+Unlike tutorial chapters, this is a reference guide—no code examples, just organized pointers. Use it to locate modules quickly, understand the stdlib's taxonomy, and jump to the detailed treatment in Chapters 44–52. xref:44__collections-and-algorithms.adoc[44] Think of it as the table of contents for Zig's batteries-included philosophy.
+
+[[learning-goals]]
+== Learning Goals
+
+* Navigate the physical layout of `zig/lib/std/` with confidence, distinguishing top-level files from subdirectories. link:https://github.com/ziglang/zig/tree/master/lib/std/[std]
+* Identify which stdlib components handle collections, I/O, formatting, compression, time, processes, and debugging. xref:44__collections-and-algorithms.adoc[44]
+* Recognize the relationship between a module's filesystem path and its import name (e.g., `std.ArrayList` maps to `array_list.zig`). link:https://github.com/ziglang/zig/tree/master/lib/std/array_list.zig[array_list.zig]
+* Use this index as a springboard to detailed API chapters without getting lost in 100+ source files. xref:44__collections-and-algorithms.adoc[44]
+
+[[stdlib-at-a-glance]]
+== Stdlib at a Glance
+
+The standard library ships as part of the Zig compiler installation and resides at `zig/lib/std/`. Its root directory contains approximately:
+
+* **70 `.zig` files** providing individual modules (e.g., `array_list.zig`, `json.zig`, `log.zig`)
+* **30+ subdirectories** grouping related functionality (e.g., `crypto/`, `compress/`, `fs/`, `math/`)
+* **1 entry point**: `std.zig`, which re-exports the public API surface
+
+When you write `@import("std")`, the compiler loads `std.zig`, which then executes `pub const ArrayList = @import("array_list.zig")` and similar for each public symbol. This flat-namespace design means `std.ArrayList` and `std.json` sit at the same level, even though some implementations span multiple files in subdirectories.
+
+[[directory-tree]]
+== Directory Tree (Selective View)
+
+Below is an ASCII tree showing key directories and representative files. This is not exhaustive (some directories contain 20+ files), but it highlights landmarks for orientation.
+
+[mermaid]
+....
+graph TB
+    subgraph "std namespace"
+        STD["std (std.zig)"]
+    end
+
+    subgraph "Core Utilities"
+        MEM["mem.zig<br/>Allocator, zeroes, copy"]
+        META["meta.zig<br/>Type introspection"]
+        MATH["math.zig<br/>Constants, operations"]
+        FMT["fmt.zig<br/>format, parseInt"]
+    end
+
+    subgraph "OS Abstraction"
+        OSMOD["os.zig<br/>environ, argv, getFdPath"]
+        POSIX["posix.zig<br/>open, read, write, mmap"]
+        LINUX["os/linux.zig<br/>syscall0-6, clone"]
+        WINDOWS["os/windows.zig<br/>OpenFile, CreatePipe"]
+    end
+
+    subgraph "Filesystem"
+        FS["fs.zig<br/>cwd, max_path_bytes"]
+        DIR["fs/Dir.zig<br/>openFile, makeDir"]
+        FILE["fs/File.zig<br/>read, write, stat"]
+    end
+
+    subgraph "Memory Management"
+        HEAP["heap.zig<br/>page_size_min"]
+        ARENA["heap/arena_allocator.zig"]
+        DEBUG_ALLOC["heap/debug_allocator.zig<br/>DebugAllocator"]
+    end
+
+    subgraph "Debugging"
+        DEBUG["debug.zig<br/>SelfInfo, captureCurrentStackTrace"]
+        DWARF["debug/Dwarf.zig"]
+        PDB["debug/Pdb.zig"]
+        CPU_CTX["debug/cpu_context.zig<br/>Native"]
+    end
+
+    subgraph "C Interop"
+        C["c.zig<br/>timespec, fd_t, mode_t"]
+        C_DARWIN["c/darwin.zig"]
+        C_FREEBSD["c/freebsd.zig"]
+    end
+
+    subgraph "Testing & Process"
+        TESTING["testing.zig<br/>allocator, expect"]
+        PROCESS["process.zig<br/>getCwd, exit"]
+        PROGRESS["Progress.zig<br/>Terminal updates"]
+    end
+
+    subgraph "Network & Other"
+        NET["net.zig<br/>Address, parseIp"]
+        UNICODE["unicode.zig<br/>utf8ToUtf16Le"]
+        COFF["coff.zig<br/>PE format"]
+    end
+
+    STD --> MEM
+    STD --> META
+    STD --> MATH
+    STD --> FMT
+    STD --> OSMOD
+    STD --> POSIX
+    STD --> FS
+    STD --> HEAP
+    STD --> DEBUG
+    STD --> C
+    STD --> TESTING
+    STD --> PROCESS
+    STD --> NET
+    STD --> UNICODE
+
+    FS --> DIR
+    FS --> FILE
+    HEAP --> ARENA
+    HEAP --> DEBUG_ALLOC
+    DEBUG --> DWARF
+    DEBUG --> PDB
+    DEBUG --> CPU_CTX
+    OSMOD --> LINUX
+    OSMOD --> WINDOWS
+    C --> C_DARWIN
+    C --> C_FREEBSD
+
+    POSIX --> OSMOD
+    FS --> POSIX
+    NET --> POSIX
+    PROCESS --> POSIX
+....
+
+[listing]
+----
+std/ ──► Build/ ──► Cache.zig, Fuzz.zig, Module.zig, Step.zig, Watch.zig, WebServer.zig, abi.zig
+           │
+           ├──► Cache/ ──► DepTokenizer.zig, Directory.zig, Path.zig
+           │
+           ├──► Step/  ──► CheckFile.zig, CheckObject.zig, Compile.zig, ConfigHeader.zig, Fail.zig,
+           │              Fmt.zig, InstallArtifact.zig, InstallDir.zig, InstallFile.zig, ObjCopy.zig,
+           │              Options.zig, RemoveDir.zig, Run.zig, TranslateC.zig, UpdateSourceFiles.zig, WriteFile.zig
+           │
+           └──► Watch/ ──► FsEvents.zig
+           
+       └──► Io/ ──► DeprecatedReader.zig, DeprecatedWriter.zig, Reader.zig, Writer.zig, counting_reader.zig
+           │
+           ├──► fixed_buffer_stream.zig, test.zig, tty.zig
+           │
+           └──► Reader/ ──► Limited.zig, test.zig
+
+       └──► Random/ ──► Ascon.zig, ChaCha.zig, Isaac64.zig, Pcg.zig, RomuTrio.zig, Sfc64.zig, SplitMix64.zig
+           │
+           ├──► Xoroshiro128.zig, Xoshiro256.zig, benchmark.zig, test.zig, ziggurat.zig
+
+       └──► Target/ ──► Query.zig, aarch64.zig, amdgcn.zig, arc.zig, arm.zig, avr.zig, bpf.zig, csky.zig
+           │
+           ├──► generic.zig, hexagon.zig, lanai.zig, loongarch.zig, m68k.zig, mips.zig, msp430.zig
+           │
+           ├──► nvptx.zig, powerpc.zig, propeller.zig, riscv.zig, s390x.zig, sparc.zig, spirv.zig
+           │
+           ├──► ve.zig, wasm.zig, x86.zig, xcore.zig, xtensa.zig
+
+       └──► Thread/ ──► Condition.zig, Futex.zig, Pool.zig, ResetEvent.zig, RwLock.zig, Semaphore.zig, WaitGroup.zig
+           │
+           ├──► Mutex/ ──► Recursive.zig
+           │
+           └──► Mutex.zig
+
+       └──► builtin/ ──► assembly.zig
+
+       └──► c/ ──► darwin.zig, dragonfly.zig, freebsd.zig, haiku.zig, netbsd.zig, openbsd.zig, serenity.zig, solaris.zig
+
+       └──► compress/ ──► flate.zig, lzma.zig, lzma2.zig, xz.zig, zstd.zig
+           │
+           ├──► flate/ ──► BlockWriter.zig, Compress.zig, Decompress.zig, HuffmanEncoder.zig, Lookup.zig, Token.zig, testdata/
+           │
+           ├──► lzma/  ──► decode/, decode.zig, test.zig, testdata/, vec2d.zig
+           │
+           ├──► lzma2/ ──► decode.zig
+           │
+           ├──► xz/    ──► block.zig, test.zig, testdata/
+           │
+           └──► zstd/  ──► Decompress.zig
+
+       └──► crypto/ ──► Certificate.zig, Sha1.zig, aegis.zig, aes.zig, aes_gcm.zig, aes_ocb.zig, argon2.zig, ascon.zig, bcrypt.zig
+           │
+           ├──► benchmark.zig, blake2.zig, blake3.zig, chacha20.zig, cmac.zig, codecs.zig, ecdsa.zig, errors.zig, ff.zig
+           │
+           ├──► ghash_polyval.zig, hash_composition.zig, hkdf.zig, hmac.zig, isap.zig, keccak_p.zig, md5.zig, ml_kem.zig
+           │
+           ├──► modes.zig, pbkdf2.zig, phc_encoding.zig, poly1305.zig, salsa20.zig, scrypt.zig, sha2.zig, sha3.zig
+           │
+           ├──► siphash.zig, test.zig, timing_safe.zig, tlcsprng.zig, tls.zig
+           │
+           ├──► 25519/ ──► curve25519.zig, ed25519.zig, edwards25519.zig, field.zig, ristretto255.zig, scalar.zig, x25519.zig
+           │
+           ├──► aes/    ──► aesni.zig, armcrypto.zig, soft.zig
+           │
+           ├──► codecs/ ──► asn1/, asn1.zig, base64_hex_ct.zig
+           │
+           ├──► pcurves/ ──► common.zig, p256/, p256.zig, p384/, p384.zig, secp256k1/, secp256k1.zig, tests/
+           │
+           └──► tls/    ──► Client.zig
+
+       └──► debug/ ──► Coverage.zig, Dwarf.zig, FixedBufferReader.zig, Info.zig, MemoryAccessor.zig, Pdb.zig, SelfInfo.zig
+           │
+           ├──► no_panic.zig, simple_panic.zig
+           │
+           └──► Dwarf/ ──► abi.zig, call_frame.zig, expression.zig
+
+       └──► dwarf/ ──► AT.zig, ATE.zig, EH.zig, FORM.zig, LANG.zig, OP.zig, TAG.zig
+
+       └──► fmt/ ──► float.zig, parse_float.zig
+           │
+           ├──► parse_float/ ──► FloatInfo.zig, FloatStream.zig, common.zig, convert_eisel_lemire.zig
+           │
+           ├──► convert_fast.zig, convert_hex.zig, convert_slow.zig, decimal.zig, parse.zig
+
+       └──► fs/ ──► AtomicFile.zig, Dir.zig, File.zig, get_app_data_dir.zig, path.zig, test.zig, wasi.zig
+
+       └──► hash/ ──► Adler32.zig, auto_hash.zig, benchmark.zig, cityhash.zig, fnv.zig, murmur.zig, verify.zig, wyhash.zig
+           │
+           └──► xxhash.zig
+           │
+           └──► crc/ ──► crc.zig, impl.zig, test.zig
+
+       └──► heap/ ──► FixedBufferAllocator.zig, PageAllocator.zig, SmpAllocator.zig, ThreadSafeAllocator.zig, WasmAllocator.zig
+           │
+           ├──► arena_allocator.zig, debug_allocator.zig, memory_pool.zig, sbrk_allocator.zig
+
+       └──► http/ ──► ChunkParser.zig, Client.zig, HeadParser.zig, HeaderIterator.zig, Server.zig, test.zig
+
+       └──► json/ ──► JSONTestSuite_test.zig, Scanner.zig, Stringify.zig, dynamic.zig, dynamic_test.zig
+           │
+           ├──► hashmap.zig, hashmap_test.zig, scanner_test.zig, static.zig, static_test.zig, test.zig
+
+       └──► math/ ──► acos.zig, acosh.zig, asin.zig, asinh.zig, atan.zig, atan2.zig, atanh.zig, cbrt.zig, copysign.zig
+           │
+           ├──► cosh.zig, expm1.zig, expo2.zig, float.zig, frexp.zig, gamma.zig, gcd.zig, hypot.zig
+           │
+           ├──► ilogb.zig, isfinite.zig, isinf.zig, isnan.zig, isnormal.zig, iszero.zig, lcm.zig, ldexp.zig, log.zig
+           │
+           ├──► log10.zig, log1p.zig, log2.zig, log_int.zig, modf.zig, nextafter.zig, pow.zig, powi.zig
+           │
+           ├──► scalbn.zig, signbit.zig, sinh.zig, sqrt.zig, tanh.zig
+           │
+           ├──► big/ ──► int.zig, int_test.zig
+           │
+           └──► complex/ ──► abs.zig, acos.zig, acosh.zig, arg.zig, asin.zig, asinh.zig, atan.zig, atanh.zig
+                          └──► conj.zig, cos.zig, cosh.zig, exp.zig, ldexp.zig, log.zig, pow.zig, proj.zig, sin.zig
+                          └──► sinh.zig, sqrt.zig, tan.zig, tanh.zig
+
+       └──► mem/ ──► Allocator.zig
+
+       └──► meta/ ──► trailer_flags.zig
+
+       └──► net/ ──► test.zig
+
+       └──► os/ ──► emscripten.zig, freebsd.zig, linux.zig, plan9.zig, uefi.zig, wasi.zig, windows.zig
+           │
+           ├──► linux/ ──► IoUring.zig, aarch64.zig, arm.zig, bpf.zig, bpf/, hexagon.zig, io_uring_sqe.zig, ioctl.zig
+           │
+           ├──► loongarch64.zig, m68k.zig, mips.zig, mips64.zig, powerpc.zig, powerpc64.zig
+           │
+           ├──► riscv32.zig, riscv64.zig, s390x.zig, seccomp.zig, sparc64.zig, syscalls.zig
+           │
+           ├──► test.zig, thumb.zig, tls.zig, vdso.zig, x86.zig, x86_64.zig
+           │
+           └──► plan9/ ──► x86_64.zig
+           │
+           └──► uefi/ ──► device_path.zig, hii.zig, pool_allocator.zig, protocol.zig, protocol/, status.zig
+           │
+           └──► windows/ ──► advapi32.zig, crypt32.zig, kernel32.zig, lang.zig, nls.zig, ntdll.zig
+                          └──► ntstatus.zig, sublang.zig, test.zig, tls.zig, win32error.zig, ws2_32.zig
+
+       └──► posix/ ──► test.zig
+
+       └──► process/ ──► Child.zig
+
+       └──► sort/ ──► block.zig, pdq.zig
+
+       └──► testing/ ──► FailingAllocator.zig
+
+       └──► time/ ──► epoch.zig
+
+       └──► unicode/ ──► (empty, API in `unicode.zig`)
+
+       └──► valgrind/ ──► cachegrind.zig, callgrind.zig, memcheck.zig
+
+       └──► tar/ ──► Writer.zig, test.zig
+           └──► testdata/
+
+       └──► tz/ ──► (empty)
+
+       └──► zon/ ──► Serializer.zig, parse.zig, stringify.zig
+
+       └──► zig/ ──► Ast.zig, AstGen.zig, AstRlAnnotate.zig, BuiltinFn.zig, Client.zig, ErrorBundle.zig
+           │
+           ├──► LibCDirs.zig, LibCInstallation.zig, Parse.zig, Server.zig, WindowsSdk.zig
+           │
+           ├──► Zir.zig, Zoir.zig, ZonGen.zig, c_builtins.zig, c_translation.zig
+           │
+           ├──► number_literal.zig, parser_test.zig, perf_test.zig, primitives.zig
+           │
+           ├──► string_literal.zig, system.zig, target.zig, tokenizer.zig
+           │
+           ├──► Ast/ ──► Render.zig
+           │
+           ├──► llvm/ ──► BitcodeReader.zig, Builder.zig, bitcode_writer.zig, ir.zig
+           │
+           └──► system/ ──► NativePaths.zig, arm.zig, darwin.zig, linux.zig, windows.zig, x86.zig
+                          └──► darwin/
+
+----
+
+TIP: Directories like `crypto/`, `compress/`, and `math/` contain dozens of specialized files. The top-level `.zig` file (e.g., `crypto.zig`) typically re-exports the subdirectory's public API, so you can write `std.crypto.aes` rather than navigating the internal structure. link:https://github.com/ziglang/zig/tree/master/lib/std/crypto.zig[crypto.zig]
+
+[[module-categories]]
+== Module Categories
+
+The following sections group stdlib functionality by purpose, mapping each category to its detailed chapter. Use this as a quick-reference guide when you know *what* you need but not *where* it lives.
+
+[[collections]]
+=== Collections and Algorithms
+
+*Covered in:* xref:44__collections-and-algorithms.adoc[Chapter 44]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.ArrayList`
+| Dynamic array (vector); see `array_list.zig`
+
+| `std.MultiArrayList`
+| Structure-of-arrays layout; see `multi_array_list.zig`
+
+| `std.HashMap` / `AutoHashMap` / `ArrayHashMap`
+| Hash tables with various storage strategies; see `hash_map.zig`, `array_hash_map.zig`
+
+| `std.StaticStringMap`
+| Compile-time perfect hash map for string keys; see `static_string_map.zig`
+
+| `std.DoublyLinkedList`
+| Intrusive doubly-linked list; see `DoublyLinkedList.zig`
+
+| `std.SinglyLinkedList`
+| Intrusive singly-linked list; see `SinglyLinkedList.zig`
+
+| `std.SegmentedList`
+| Segmented list maintaining stable pointers; see `segmented_list.zig`
+
+| `std.Treap`
+| Treap (tree + heap); see `treap.zig`
+
+| `std.PriorityQueue`
+| Min/max heap; see `priority_queue.zig`
+
+| `std.PriorityDequeue`
+| Double-ended priority queue; see `priority_dequeue.zig`
+
+| `std.sort`
+| Sorting algorithms (pdqsort, block sort); see `sort/`
+
+|===
+
+[[text-formatting]]
+=== Text, Formatting, and Unicode
+
+*Covered in:* xref:45__text-formatting-and-unicode.adoc[Chapter 45]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.fmt`
+| Formatting API: `format`, `parseInt`, `parseFloat`; see `fmt/`
+
+| `std.ascii`
+| ASCII character utilities; see `ascii.zig`
+
+| `std.unicode`
+| Unicode operations (UTF-8, UTF-16); see `unicode/`
+
+| `std.base64`
+| Base64 encoding/decoding; see `base64.zig`
+
+| `std.leb128`
+| LEB128 encoding; see `leb128.zig`
+
+|===
+
+[[io-streams]]
+=== I/O and Stream Adapters
+
+*Covered in:* xref:46__io-and-stream-adapters.adoc[Chapter 46]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.io` (now `std.Io`)
+| Reader/Writer interfaces; see `Io.zig`, `Io/`
+
+| `std.fs`
+| Filesystem operations: `Dir`, `File`, `path`; see `fs/`
+
+| `std.io.fixedBufferStream`
+| Fixed-buffer stream adapter; see `Io/fixed_buffer_stream.zig`
+
+| `std.io.countingReader`
+| Counting reader adapter; see `Io/counting_reader.zig`
+
+|===
+
+[[time-logging-progress]]
+=== Time, Logging, and Progress
+
+*Covered in:* xref:47__time-logging-and-progress.adoc[Chapter 47]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.time`
+| Timekeeping, sleep, clocks; see `time/`
+
+| `std.log`
+| Logging framework with levels; see `log.zig`
+
+| `std.Progress`
+| Progress reporting; see `Progress.zig`
+
+| `std.tz`
+| Time zone data; see `tz/`
+
+|===
+
+[[process-environment]]
+=== Process and Environment
+
+*Covered in:* xref:48__process-and-environment.adoc[Chapter 48]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.process`
+| Args, environment, spawning child processes; see `process/`
+
+| `std.posix`
+| POSIX wrappers; see `posix/`
+
+| `std.os`
+| Platform-specific OS interfaces; see `os/`
+
+|===
+
+[[compression-archives]]
+=== Compression and Archives
+
+*Covered in:* xref:49__compression-and-archives.adoc[Chapter 49]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.compress`
+| Compression: flate, lzma, lzma2, zstd; see `compress/`
+
+| `std.tar`
+| TAR archive reading/writing; see `tar/`
+
+| `std.zip`
+| ZIP archive support; see `zip.zig`
+
+|===
+
+[[random-math-hashing]]
+=== Random, Math, and Hashing
+
+*Covered in:* xref:50__random-and-math.adoc[Chapter 50]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.Random`
+| PRNGs: ChaCha, PCG, Ascon; see `Random/`
+
+| `std.math`
+| Math functions (trig, exp, log, etc.); see `math/`
+
+| `std.hash`
+| Non-crypto hashing: CRC, Adler32, auto_hash; see `hash/`
+
+| `std.crypto`
+| Cryptographic primitives: AES, Ed25519, SHA-2, AEGIS; see `crypto/`
+
+|===
+
+[[mem-meta]]
+=== Mem and Meta Utilities
+
+*Covered in:* xref:51__mem-and-meta-utilities.adoc[Chapter 51]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.mem`
+| Memory utilities: split, tokenize, copy, search; see `mem.zig`, `mem/`
+
+| `std.meta`
+| Type introspection helpers; see `meta/`, `meta.zig`
+
+|===
+
+[[debug-valgrind]]
+=== Debug and Valgrind
+
+*Covered in:* xref:52__debug-and-valgrind.adoc[Chapter 52]
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.debug`
+| Panic, stack traces, DWARF info; see `debug/`
+
+| `std.valgrind`
+| Valgrind integration (memcheck, cachegrind); see `valgrind/`
+
+|===
+
+[[specialized-modules]]
+== Specialized Modules (Not Covered in Detail)
+
+Some stdlib components are highly specialized or primarily internal to the compiler. They appear in the directory tree but aren't the focus of the upcoming chapters:
+
+[cols="1,2", options="header"]
+|===
+| Module/Path | Purpose
+
+| `std.Build`
+| Build system internals; see `Build/`, covered in xref:22__build-system-deep-dive.adoc[Chapter 22]
+
+| `std.zig`
+| Compiler AST, codegen; see `zig/`; advanced topic
+
+| `std.zon`
+| ZON parser/serializer; see `zon/`
+
+| `std.Target`
+| Target architecture metadata; see `Target/`
+
+| `std.SemanticVersion`
+| Semantic versioning; see `SemanticVersion.zig`
+
+| `std.Uri`
+| URI parsing; see `Uri.zig`
+
+| `std.wasm`
+| WebAssembly constants; see `wasm.zig`
+
+| `std.elf`, `std.macho`, `std.coff`, `std.pdb`
+| Binary format parsers; see respective `.zig` files
+
+| `std.dwarf`
+| DWARF constants; see `dwarf/`
+
+| `std.Thread`
+| Threading primitives; touched in xref:29__threads-and-atomics.adoc[Chapter 29]
+
+| `std.atomic`, `std.once`
+| Atomic operations, one-time initialization; see xref:29__threads-and-atomics.adoc[Chapter 29]
+
+| `std.http`, `std.net`, `std.json`
+| Networking and HTTP; covered in xref:31__networking-http-and-json.adoc[Chapter 31]
+
+|===
+
+[[import-conventions]]
+== Import Conventions
+
+Zig's stdlib uses a flat namespace at the top level: `std.ArrayList`, `std.HashMap`, `std.json`, etc. Internally, some modules split across subdirectories (`crypto/`, `compress/`), but the public API is re-exported through a single `.zig` file in the root.
+
+*Examples:*
+
+* `std.crypto.aes` → defined in `crypto/aes/`, re-exported by `crypto.zig`
+* `std.compress.flate` → defined in `compress/flate/`, re-exported by `compress.zig`
+* `std.fs.Dir` → defined in `fs/Dir.zig`, re-exported by `fs.zig`
+
+TIP: When in doubt, check `std.zig` for the canonical export name, then trace it to the implementing file.
+
+[[navigating-source]]
+== Navigating the Source
+
+To explore the stdlib yourself:
+
+1. **Locate your Zig installation**: Run `zig env` and note `lib_dir`. link:https://ziglang.org/documentation/master/#Command-line-flags[#Command-line-flags]
+2. **Browse `lib/std/`**: Use `ls`, `tree`, or your editor's file explorer.
+3. **Read top-level files first**: `std.zig` shows what's public; individual `.zig` files contain implementation.
+4. **Check subdirectories for depth**: Directories like `crypto/`, `compress/`, `math/` house specialized code. link:https://github.com/ziglang/zig/tree/master/lib/std/crypto/[crypto]
+
+TIP: The stdlib is written in Zig, so reading its source is an excellent way to learn idiomatic patterns—especially error handling, allocator threading, and comptime tricks.
+
+[[whats-next]]
+== What's Next
+
+This index orients you, but the real learning happens in the detailed chapters:
+
+* **Chapter 44**: Collections and algorithms—`ArrayList`, `HashMap`, `PriorityQueue`, sorting. xref:44__collections-and-algorithms.adoc[44]
+* **Chapter 45**: Text, formatting, Unicode—`std.fmt`, `std.ascii`, Base64. xref:45__text-formatting-and-unicode.adoc[45]
+* **Chapter 46**: I/O and streams—`std.Io`, `std.fs`, adapters. xref:46__io-and-stream-adapters.adoc[46]
+* **Chapter 47**: Time, logging, progress—`std.time`, `std.log`, `std.Progress`. xref:47__time-logging-and-progress.adoc[47]
+* **Chapter 48**: Process and environment—`std.process`, `std.posix`. xref:48__process-and-environment.adoc[48]
+* **Chapter 49**: Compression and archives—`std.compress`, `std.tar`, `std.zip`. xref:49__compression-and-archives.adoc[49]
+* **Chapter 50**: Random, math, hashing—`std.Random`, `std.math`, `std.crypto`. xref:50__random-and-math.adoc[50]
+* **Chapter 51**: Mem and meta utilities—`std.mem`, `std.meta`. xref:51__mem-and-meta-utilities.adoc[51]
+* **Chapter 52**: Debug and Valgrind—`std.debug`, `std.valgrind`. xref:52__debug-and-valgrind.adoc[52]
+
+Each chapter provides code examples, API walkthroughs, and practical guidance. Use this index to jump directly to the module you need.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* This index reflects Zig 0.15.2. Future versions may reorganize modules or rename exports. link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
+* Not all stdlib components are stable—some are marked experimental or subject to breaking changes between releases.
+* The compiler's own internals (`pass:[std.zig.*]`, `pass:[std.Build.*]`) are advanced topics. Start with user-facing APIs like collections and I/O before diving into AST manipulation. link:https://github.com/ziglang/zig/tree/master/lib/std/zig/[zig]
+
+[[exercises]]
+== Exercises
+
+* Run `zig env` and navigate to `lib_dir/std/`, then `ls` the root to see all top-level modules. Pick three you've never heard of and read their first 20 lines to understand their purpose.
+* Open `std.zig` in your editor and trace how `std.ArrayList` is defined. (Hint: `pub const ArrayList = @import("array_list.zig").ArrayList;`)
+* Grep the stdlib for `pub fn` to count how many public functions exist across all modules. Use this to gauge the stdlib's scope.
+* Compare the directory structure of `crypto/` vs. `compress/`. Notice how both contain subdirectories for specific algorithms, illustrating Zig's modular organization philosophy.
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, alternatives, edge cases
+
+* Some modules have both a `.zig` file and a directory (e.g., `fmt.zig` and `fmt/`). The file typically re-exports the directory's contents or provides a high-level API. link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig]
+* The stdlib does *not* include a package manager or registry integration (that's external tooling). It focuses on language-level utilities and OS abstractions.
+* Third-party libraries are not part of `std`. You'll use `build.zig.zon` and `std.Build.dependency()` to fetch them.

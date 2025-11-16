@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>Grep-Lite</subtitle>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Our second project graduates from arithmetic to text processing: a tiny <literal>grep</literal> clone that accepts a search pattern and a file path, then prints only the matching lines. The exercise reinforces argument handling from the previous chapter while introducing file I/O and slice utilities from the standard library. <link xl:href="https://ziglang.org/documentation/master/#Command-line-flags">#Command-line-flags</link>, <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig">File.zig</link></simpara>
+<simpara>Instead of streaming byte-by-byte, we lean on Zig&#8217;s memory-safe helpers to load the file, split it into lines, and surface hits with straightforward substring checks. Every failure path produces a user-friendly message before exiting, so the tool behaves predictably inside shell scripts—a theme we will carry into the next project. See <link xl:href="https://ziglang.org/documentation/master/#Command-line-flags">#Command-line-flags</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig">File.zig</link> for related APIs, and <link xl:href="https://ziglang.org/documentation/master/#Error-Handling">#Error-Handling</link> for error-handling patterns.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Implement a command-line parsing routine that supports <literal>--help</literal>, enforces arity, and terminates gracefully on misuse.</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>std.fs.File.readToEndAlloc</literal> and <literal>std.mem.splitScalar</literal> to load and iterate over file contents (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/mem.zig">mem.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Filter lines with <literal>std.mem.indexOf</literal> and report results via stdout while directing diagnostics to stderr (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/debug.zig">debug.zig</link>).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="section-1">
+<title>Building the Search Harness</title>
+<simpara>We start by wiring the CLI front end: allocate arguments, honor <literal>--help</literal>, and confirm that exactly two positional parameters — pattern and path — are present. Any deviation prints a usage banner and exits with code 1, avoiding stack traces while still signaling failure to the caller.</simpara>
+<section xml:id="section-1-sub-a">
+<title>Validating Arguments and Usage Paths</title>
+<simpara>The skeleton mirrors Chapter 5’s TempConv CLI, but now we emit diagnostics to stderr and exit explicitly whenever input is wrong or a file cannot be opened. <literal>printUsage</literal> keeps the banner in one place, and <literal>std.process.exit</literal> guarantees we stop immediately after the message is written.</simpara>
+</section>
+<section xml:id="section-1-sub-b">
+<title>Loading and Splitting the File</title>
+<simpara>Rather than juggling partial reads, we load the file into memory with <literal>File.readToEndAlloc</literal>, capping the size to eight megabytes to guard against unexpected giants. A single call to <literal>std.mem.splitScalar</literal> then produces an iterator over newline-delimited segments, which we trim for Windows-style carriage returns.</simpara>
+<section xml:id="_understanding_std_fs_structure">
+<title>Understanding std.fs Structure</title>
+<simpara>Before diving into file operations, it&#8217;s helpful to understand how Zig&#8217;s filesystem API is organized. The <literal>std.fs</literal> module provides a layered hierarchy that makes file access portable and composable:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "File System API Hierarchy"
+        CWD["std.fs.cwd()&lt;br/&gt;Returns: Dir"]
+        DIR["Dir type&lt;br/&gt;(fs/Dir.zig)"]
+        FILE["File type&lt;br/&gt;(fs/File.zig)"]
+    end
+
+    subgraph "Dir Operations"
+        OPENFILE["openFile(path, flags)&lt;br/&gt;Returns: File"]
+        MAKEDIR["makeDir(path)"]
+        OPENDIR["openDir(path)&lt;br/&gt;Returns: Dir"]
+        ITERATE["iterate()&lt;br/&gt;Returns: Iterator"]
+    end
+
+    subgraph "File Operations"
+        READ["read(buffer)&lt;br/&gt;Returns: bytes read"]
+        READTOEND["readToEndAlloc(allocator, max_size)&lt;br/&gt;Returns: []u8"]
+        WRITE["write(bytes)&lt;br/&gt;Returns: bytes written"]
+        SEEK["seekTo(pos)"]
+        CLOSE["close()"]
+    end
+
+    CWD --&gt; DIR
+    DIR --&gt; OPENFILE
+    DIR --&gt; MAKEDIR
+    DIR --&gt; OPENDIR
+    DIR --&gt; ITERATE
+
+    OPENFILE --&gt; FILE
+    OPENDIR --&gt; DIR
+
+    FILE --&gt; READ
+    FILE --&gt; READTOEND
+    FILE --&gt; WRITE
+    FILE --&gt; SEEK
+    FILE --&gt; CLOSE</literallayout>
+<simpara><emphasis role="strong">Key concepts:</emphasis></simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Entry Point</emphasis>: <literal>std.fs.cwd()</literal> returns a <literal>Dir</literal> handle representing the current working directory</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Dir Type</emphasis>: Provides directory-level operations like opening files, creating subdirectories, and iterating contents</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">File Type</emphasis>: Represents an open file with read/write operations</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Chained Calls</emphasis>: You call <literal>cwd().openFile()</literal> because <literal>openFile()</literal> is a method on the <literal>Dir</literal> type</simpara>
+</listitem>
+</itemizedlist>
+<simpara><emphasis role="strong">Why this structure matters for Grep-Lite:</emphasis></simpara>
+<programlisting language="zig" linenumbering="unnumbered">// This is why we write:
+const file = try std.fs.cwd().openFile(path, .{});
+//                    ^        ^
+//                    |        +-- Method on Dir
+//                    +----------- Returns Dir handle</programlisting>
+<simpara>The two-step process (<literal>cwd()</literal> → <literal>openFile()</literal>) gives you control over <emphasis role="strong">which</emphasis> directory to open files in. While this example uses the current directory, you could equally use:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.fs.openDirAbsolute()</literal> for absolute paths</simpara>
+</listitem>
+<listitem>
+<simpara><literal>dir.openFile()</literal> for files relative to any directory handle</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.fs.openFileAbsolute()</literal> to skip the <literal>Dir</literal> entirely</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This composable design makes filesystem code testable (use a temporary directory) and portable (the same API works across platforms).</simpara>
+</section>
+</section>
+</chapter>
+<chapter xml:id="section-2">
+<title>Scanning for Matches</title>
+<simpara>Once we own a slice for each line, matching is a one-liner with <literal>std.mem.indexOf</literal>. We reuse the TempConv pattern of reserving stdout for successful output and stderr for diagnostics, making the tool piping-friendly.</simpara>
+<section xml:id="workflow-1">
+<title>Complete Grep-Lite Listing</title>
+<simpara>The full listing below highlights how the helper functions slot together. Pay attention to the comments that tie each block back to the sections above.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 06__project-grep-lite.adoc - include::example$chapters-data/code/06__project-grep-lite/grep_lite.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run grep_lite.zig -- pattern grep_lite.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">    std.debug.print("usage: grep-lite &lt;pattern&gt; &lt;path&gt;\n", .{});
+        std.debug.print("error: expected a pattern and a path\n", .{});
+    const pattern = args[1];
+        if (std.mem.indexOf(u8, line, pattern) != null) {
+        std.debug.print("no matches for '{s}' in {s}\n", .{ pattern, path });</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>The output shows every source line containing the literal word <literal>pattern</literal>. Your match list will differ when run against other files.</simpara>
+</note>
+</section>
+<section xml:id="workflow-2">
+<title>Detecting Missing Files Gracefully</title>
+<simpara>To keep shell scripts predictable, the tool emits a single-line diagnostic and exits with a non-zero status when a file path cannot be opened.</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run grep_lite.zig -- foo missing.txt</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">error: unable to open 'missing.txt'</programlisting>
+</para>
+</formalpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>readToEndAlloc</literal> is simple but loads the entire file; add a streaming reader later if you need to handle very large inputs.</simpara>
+</listitem>
+<listitem>
+<simpara>The size cap prevents runaway allocations. Raise or make it configurable once you trust your deployment environment.</simpara>
+</listitem>
+<listitem>
+<simpara>This example uses a buffered stdout writer for matches and <literal>std.debug.print</literal> for diagnostics to stderr; we flush via the writer&#8217;s <literal>end()</literal> at exit (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io.zig">Io.zig</link>).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Accept multiple files on the command line and print a <literal>path:line</literal> prefix for each match (see <link xl:href="https://ziglang.org/documentation/master/#for">#for</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Add a <literal>--ignore-case</literal> flag by normalizing both the pattern and each line with <literal>std.ascii.toLower</literal> (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/ascii.zig">ascii.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Support regular expressions by integrating a third-party matcher after loading the entire buffer.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Windows files often end lines with <literal>\r\n</literal>; trimming the carriage return keeps substring checks clean.</simpara>
+</listitem>
+<listitem>
+<simpara>Empty patterns currently match every line. Introduce an explicit guard if you prefer to treat an empty string as misuse.</simpara>
+</listitem>
+<listitem>
+<simpara>To integrate with larger builds, replace <literal>zig run</literal> with a <literal>zig build-exe</literal> step and package the binary on your <literal>PATH</literal>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

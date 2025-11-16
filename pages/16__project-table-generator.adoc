@@ -1,0 +1,156 @@
+////
+changes: ["New project chapter: Table Generator (verbose, in-depth)", "Added three runnable demos with captured outputs and design rationale"]
+examples_compile: yes
+keywords: ["comptime", "lookup table", "reflection", "table generation", "ascii", "popcount", "formatting"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "17__generic-apis-and-type-erasure"
+open_questions: []
+previous_chapter: "15__comptime-and-reflection"
+status: draft
+xref_complete: true
+////
+
+= Project: Table Generator
+:chapter-number: 16
+:chapter-slug: project-table-generator
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+In this project, we turn the ideas from xref:15__comptime-and-reflection.adoc[15] into a practical workflow: generate small lookup tables at compile time and use them at runtime with zero overhead. This technique removes branches from hot loops, replaces repeated work with constant data, and keeps code simple. We’ll take a “measure-first” mindset and show when a table helps and when it’s not worth the binary size.
+
+We’ll implement three self-contained demos:
+
+- ASCII classification table: constant-time character categorization (digit/alpha/space/punct)
+- Popcount table: fast bit counting for bytes, composable for larger aggregates
+- Multiplication table: a parameterized N×N matrix rendered compactly
+
+Each example uses Zig’s modern stdout writer (see the Writergate changes) and prints visible results when run directly. See link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2] and link:https://github.com/ziglang/zig/tree/master/lib/std/ascii.zig[ascii.zig].
+
+[[learning-goals]]
+== Learning Goals
+
+* Design compile-time table builders that are simple, readable, and fast. xref:15__comptime-and-reflection.adoc[15]
+* Weigh trade-offs: code size vs speed, flexibility vs “baked-in” constants. xref:39__performance-and-inlining.adoc[41]
+* Format and present tables cleanly using `std.Io.Writer` with minimal allocation. xref:45__text-formatting-and-unicode.adoc[47]
+
+[[ascii-class-table]]
+== ASCII classification table
+
+We construct a 256-entry table mapping bytes to bitmasks for digit/alpha/space/punct. At runtime, we summarize an input string. The “punctuation” set is derived from `isPrint && !isAlphanumeric && !isWhitespace` (sufficient for ASCII).
+
+[source,zig]
+----
+include::{sourcedir}/16__project-table-generator/ascii_class_table.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run ascii_class_table.zig
+----
+
+.Output
+[source,shell]
+----
+input: Hello, Zig 0.15.2!  
+
+digits=4 letters=8 spaces=6 punct=4
+----
+
+TIP: Tables like this remove repeated branching in inner loops. Keep the derivation logic easy to audit, and prefer `std.ascii` helpers where possible. xref:15__comptime-and-reflection.adoc[15]
+
+[[popcount-table]]
+== Popcount table for bytes
+
+Rather than call a bit-twiddling routine per byte, we bake a 256-entry popcount table and reduce across inputs. This scales from toy examples to “count set bits in a buffer” primitives.
+
+[source,zig]
+----
+include::{sourcedir}/16__project-table-generator/popcount_table.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run popcount_table.zig
+----
+
+.Output
+[source,shell]
+----
+bytes: 0x00 0x0F 0xF0 0xAA 0xFF -> total set bits = 20
+----
+
+NOTE: In many workloads, the CPU’s POPCNT instruction (or `std.math.popCount`) is already fast. Prefer a table only when your profile shows that it helps for your data access pattern and platform. xref:50__random-and-math.adoc[52]
+
+[[times-table]]
+== Parameterized multiplication table (N×N)
+
+Here the table dimension is a `comptime` parameter, so the compiler unrolls generation and stores a compact `[N][N]u16`. We format a 12×12 “times table” and only print a subset to keep output readable.
+
+[source,zig]
+----
+include::{sourcedir}/16__project-table-generator/mult_table.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run mult_table.zig
+----
+
+.Output
+[source,shell]
+----
+12x12 multiplication table (partial):
+   1   2   3   4   5   6   7   8   9  10  11  12
+   2   4   6   8  10  12  14  16  18  20  22  24
+   3   6   9  12  15  18  21  24  27  30  33  36
+   4   8  12  16  20  24  28  32  36  40  44  48
+   5  10  15  20  25  30  35  40  45  50  55  60
+   6  12  18  24  30  36  42  48  54  60  66  72
+----
+
+IMPORTANT: `inline while/for` constructs need compile-time-known bounds; pairing them with `comptime var` indices makes intent explicit. Choose ordinary loops unless you have a reason to unroll. xref:15__comptime-and-reflection.adoc[15]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Binary size vs speed: tables cost memory. Use them when they remove meaningful work from a hot path and your binary budget allows it. xref:39__performance-and-inlining.adoc[41]
+* Portability: ASCII classification is straightforward; Unicode requires a different strategy (tables of ranges/pages or a library). xref:45__text-formatting-and-unicode.adoc[47]
+* I/O: The examples use the Zig 0.15.2 `std.Io.Writer` interface with a buffer in the interface—don’t forget to call `flush()`.
+
+[[exercises]]
+== Exercises
+
+* Extend the ASCII table with additional classes (hex digits, control) and print a histogram for arbitrary input files.
+* Generate a `crc32` or `crc16` table at compile time and validate against a known test vector at runtime (as a small end-to-end demo). xref:15__comptime-and-reflection.adoc[15]
+* Parameterize the multiplication table’s cell formatter to align at different widths; measure the impact on readability and code size. xref:45__text-formatting-and-unicode.adoc[47]
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Table invalidation: if inputs change shape (e.g., switching from ASCII to UTF-8 code points), document assumptions prominently and introduce compile-time assertions to catch misuse early. xref:36__style-and-best-practices.adoc[37]
+* Micro-architectural effects: depending on cache behavior, a branchy routine can outperform a table walk; profile with realistic data. xref:40__profiling-optimization-hardening.adoc[42]
+* For tables much larger than CPU caches, consider on-demand generation, chunking, or precomputed assets loaded from disk rather than embedding in the binary. xref:28__filesystem-and-io.adoc[28]

@@ -1,0 +1,317 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Control Flow Essentials</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Chapter 1 established the building blocks for running a Zig program and working with data; now we turn those values into decisions by walking through the language&#8217;s control-flow primitives, as described in <link xl:href="https://ziglang.org/documentation/master/#if">#if</link>. Control flow in Zig is expression-oriented, so choosing a branch or looping often produces a value instead of merely guiding execution.</simpara>
+<simpara>We explore the semantics behind loops, labeled flow, and <literal>switch</literal>, emphasizing how <literal>break</literal>, <literal>continue</literal>, and <literal>else</literal> clauses communicate intent in both safe and release builds; see <link xl:href="https://ziglang.org/documentation/master/#While">#While</link>, <link xl:href="https://ziglang.org/documentation/master/#for">#for</link>, and <link xl:href="https://ziglang.org/documentation/master/#switch">#switch</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Use <literal>if</literal> expressions (with optional payload capture) to derive values while handling missing data paths explicitly.</simpara>
+</listitem>
+<listitem>
+<simpara>Combine <literal>while</literal>/<literal>for</literal> loops with labeled <literal>break</literal>/<literal>continue</literal> to manage nested iteration and exit conditions clearly.</simpara>
+</listitem>
+<listitem>
+<simpara>Apply <literal>switch</literal> to enumerate exhaustive decision tables, including ranges, multiple values, and enumerations.</simpara>
+</listitem>
+<listitem>
+<simpara>Leverage loop <literal>else</literal> clauses and labeled breaks to return values directly from iteration constructs.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="pipeline-overview">
+<title>What Happens to Control Flow Code</title>
+<simpara>Before diving into control flow syntax, it is helpful to understand what the compiler does with your <literal>if</literal>, <literal>while</literal>, and <literal>switch</literal> statements. Zig transforms source code through multiple intermediate representations (IRs), each serving a specific purpose:</simpara>
+<literallayout class="monospaced">graph LR
+    SOURCE["Source Code&lt;br/&gt;.zig files"]
+    TOKENS["Token Stream"]
+    AST["AST&lt;br/&gt;(Ast.zig)"]
+    ZIR["ZIR&lt;br/&gt;(Zir)"]
+    AIR["AIR&lt;br/&gt;(Air.zig)"]
+    MIR["MIR&lt;br/&gt;(codegen.AnyMir)"]
+    MACHINE["Machine Code"]
+
+    SOURCE --&gt;|"tokenizer.zig"| TOKENS
+    TOKENS --&gt;|"Parse.zig"| AST
+    AST --&gt;|"AstGen.zig"| ZIR
+    ZIR --&gt;|"Sema.zig"| AIR
+    AIR --&gt;|"codegen.generateFunction()"| MIR
+    MIR --&gt;|"codegen.emitFunction()"| MACHINE</literallayout>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="4">
+<colspec colname="col_1" colwidth="25*"/>
+<colspec colname="col_2" colwidth="25*"/>
+<colspec colname="col_3" colwidth="25*"/>
+<colspec colname="col_4" colwidth="25*"/>
+<thead>
+<row>
+<entry align="left" valign="top">IR Stage</entry>
+<entry align="left" valign="top">Representation</entry>
+<entry align="left" valign="top">Key Properties</entry>
+<entry align="left" valign="top">Purpose for Control Flow</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara><emphasis role="strong">Tokens</emphasis></simpara></entry>
+<entry align="left" valign="top"><simpara>Flat token stream</simpara></entry>
+<entry align="left" valign="top"><simpara>Raw lexical analysis</simpara></entry>
+<entry align="left" valign="top"><simpara>Recognizes <literal>if</literal>, <literal>while</literal>, <literal>switch</literal> keywords</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><emphasis role="strong">AST</emphasis></simpara></entry>
+<entry align="left" valign="top"><simpara>Tree structure</simpara></entry>
+<entry align="left" valign="top"><simpara>Syntax-correct, untyped</simpara></entry>
+<entry align="left" valign="top"><simpara>Preserves structure of nested control flow</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><emphasis role="strong">ZIR</emphasis></simpara></entry>
+<entry align="left" valign="top"><simpara>Instruction-based IR</simpara></entry>
+<entry align="left" valign="top"><simpara>Untyped, single SSA form per declaration</simpara></entry>
+<entry align="left" valign="top"><simpara>Lowers control flow to blocks and branches</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><emphasis role="strong">AIR</emphasis></simpara></entry>
+<entry align="left" valign="top"><simpara>Instruction-based IR</simpara></entry>
+<entry align="left" valign="top"><simpara>Fully typed, single SSA form per function</simpara></entry>
+<entry align="left" valign="top"><simpara>Type-checked branches with known outcomes</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><emphasis role="strong">MIR</emphasis></simpara></entry>
+<entry align="left" valign="top"><simpara>Backend-specific IR</simpara></entry>
+<entry align="left" valign="top"><simpara>Near machine code, register-allocated</simpara></entry>
+<entry align="left" valign="top"><simpara>Converts to jumps and conditional instructions</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+<simpara>The control flow constructs you write—<literal>if</literal> expressions, <literal>switch</literal> statements, labeled loops—are systematically lowered through these stages. By the time your code reaches machine code, a <literal>switch</literal> has become a jump table, and a <literal>while</literal> loop is a conditional branch instruction. The diagrams in this chapter show how this lowering happens at the ZIR stage, where control flow becomes explicit blocks and branches.</simpara>
+</chapter>
+<chapter xml:id="section-1">
+<title>Core Control Structures</title>
+<simpara>Control flow in Zig treats blocks and loops as expressions, which means each construct can yield a value and participate directly in assignment or return statements. This section steps through conditionals, loops, and <literal>switch</literal>, showing how each fits into the expression model while keeping readability high, as described in <link xl:href="https://ziglang.org/documentation/master/#Blocks">#Blocks</link>.</simpara>
+<section xml:id="section-1-sub-a">
+<title>Conditionals as Expressions</title>
+<simpara><literal>if</literal> evaluates to the value of whichever branch runs, and the optional capture form (<literal>if (opt) |value|</literal>) is a concise way to unwrap optionals without shadowing earlier names. Nested labeled blocks (<literal>blk: { &#8230;&#8203; }</literal>) let you choose among multiple outcomes while still returning a single value.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 02__control-flow-essentials.adoc - include::example$chapters-data/code/02__control-flow-essentials/branching.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run branching.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">sample 0: positive
+sample 1: zero
+sample 2: missing
+sample 3: negative</programlisting>
+</para>
+</formalpara>
+<simpara>The function returns a <literal>[]const u8</literal> because the <literal>if</literal> expression itself produces the string, stressing how expression-oriented branching keeps call sites compact. The <literal>samples</literal> loop shows that <literal>for</literal> can iterate with an index tuple <literal>(item, index)</literal> yet still rely on the upstream expression to format output.</simpara>
+<section xml:id="_how_if_else_expressions_lower_to_zir">
+<title>How if-else Expressions Lower to ZIR</title>
+<simpara>When the compiler encounters an <literal>if</literal> expression, it transforms it into blocks and conditional branches in ZIR (Zig Intermediate Representation). The exact lowering depends on whether a result location is needed; see <link xl:href="60__advanced-result-location-semantics.xml#patterns">result location</link>:</simpara>
+<literallayout class="monospaced">graph TB
+    IfNode["if (cond) then_expr else else_expr"] --&gt; EvalCond["Evaluate condition"]
+
+    EvalCond --&gt; CheckRL["Result location needed?"]
+
+    CheckRL --&gt;|No RL| SimpleIf["Generate condbr&lt;br/&gt;Two blocks with breaks"]
+    CheckRL --&gt;|With RL| BlockIf["Generate block_inline&lt;br/&gt;Shared result pointer"]
+
+    SimpleIf --&gt; ThenBlock["then_block:&lt;br/&gt;eval then_expr&lt;br/&gt;break value"]
+    SimpleIf --&gt; ElseBlock["else_block:&lt;br/&gt;eval else_expr&lt;br/&gt;break value"]
+
+    BlockIf --&gt; AllocResult["alloc_inferred"]
+    BlockIf --&gt; ThenBlockRL["then_block:&lt;br/&gt;write to result ptr"]
+    BlockIf --&gt; ElseBlockRL["else_block:&lt;br/&gt;write to result ptr"]</literallayout>
+<simpara>When you write <literal>const result = if (x &gt; 0) "positive" else "negative"</literal>, the compiler creates two blocks (one for each branch) and uses <literal>break</literal> statements to return the chosen value. This is why <literal>if</literal> expressions can participate in assignments—they compile to blocks that yield values through their break statements.</simpara>
+</section>
+</section>
+<section xml:id="section-1-sub-b">
+<title>While and For Loops with Labels</title>
+<simpara>Loops in Zig can deliver values directly by pairing a <literal>break</literal> result with the loop&#8217;s <literal>else</literal> clause, which fires when execution completes without breaking. Labeled loops (<literal>outer: while (&#8230;&#8203;)</literal>) coordinate nested iteration so you can exit early or skip work without temporary booleans.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 02__control-flow-essentials.adoc - include::example$chapters-data/code/02__control-flow-essentials/loop_labels.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run loop_labels.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">first all-even row: 1
+found target value at row 1, column 1</programlisting>
+</para>
+</formalpara>
+<simpara>The <literal>while</literal> loop&#8217;s <literal>else null</literal> captures the "no match" case without extra state, and the labeled <literal>break :outer</literal> instantly exits both loops once the target is found. This pattern keeps state handling tight while remaining explicit about the control transfer.</simpara>
+<section xml:id="_how_loops_lower_to_zir">
+<title>How Loops Lower to ZIR</title>
+<simpara>Loops are transformed into labeled blocks with explicit break and continue targets. This is what makes labeled breaks and loop <literal>else</literal> clauses possible:</simpara>
+<literallayout class="monospaced">graph TB
+    Loop["while/for"] --&gt; LoopLabel["Create labeled block"]
+
+    LoopLabel --&gt; Condition["Generate loop condition"]
+    Condition --&gt; Body["Generate loop body"]
+    Body --&gt; Continue["Generate continue expression"]
+
+    LoopLabel --&gt; BreakTarget["break_block target"]
+    Body --&gt; ContinueTarget["continue_block target"]
+
+    Continue --&gt; CondCheck["Jump back to condition"]</literallayout>
+<simpara>When you write <literal>outer: while (x &lt; 10)</literal>, the compiler creates:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">break_block</emphasis>: The target for <literal>break :outer</literal> statements—exits the loop</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">continue_block</emphasis>: The target for <literal>continue :outer</literal> statements—jumps to the next iteration</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Loop body</emphasis>: Contains your code, with access to both targets</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This is why you can nest loops and use labeled breaks to exit to a specific level—each loop label creates its own break_block in ZIR. The loop <literal>else</literal> clause is attached to the break_block and only executes when the loop completes without breaking.</simpara>
+</section>
+</section>
+<section xml:id="section-1-sub-c">
+<title><literal>switch</literal> for Exhaustive Decisions</title>
+<simpara><literal>switch</literal> checks values exhaustively—covering literals, ranges, and enums—and the compiler enforces totality unless you provide an <literal>else</literal> branch. Combining <literal>switch</literal> with helper functions is a clean way to centralize categorization logic.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 02__control-flow-essentials.adoc - include::example$chapters-data/code/02__control-flow-essentials/switch_examples.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run switch_examples.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">0: no progress
+2: warming up
+5: halfway there
+8: almost done
+10: perfect run
+12: out of range
+mode safe -&gt; factor 16</programlisting>
+</para>
+</formalpara>
+<simpara>Every <literal>switch</literal> must account for all possibilities—once every tag is covered, the compiler verifies there is no missing case. Enumerations eliminate magic numbers while still letting you branch on compile-time-known variants.</simpara>
+<section xml:id="_how_switch_expressions_lower_to_zir">
+<title>How <literal>switch</literal> Expressions Lower to ZIR</title>
+<simpara>The compiler transforms <literal>switch</literal> statements into a structured block that handles all cases exhaustively. Range cases, multiple values per prong, and payload captures are all encoded in the ZIR representation:</simpara>
+<literallayout class="monospaced">graph TB
+    Switch["switch (target) { ... }"] --&gt; EvalTarget["Evaluate target operand"]
+    EvalTarget --&gt; Prongs["Process switch prongs"]
+
+    Prongs --&gt; Multi["Multiple cases per prong"]
+    Prongs --&gt; Range["Range cases (a...b)"]
+    Prongs --&gt; Capture["Capture payload"]
+
+    Multi --&gt; SwitchBlock["Generate switch_block"]
+    Range --&gt; SwitchBlock
+    Capture --&gt; SwitchBlock
+
+    SwitchBlock --&gt; ExtraData["Store in extra:&lt;br/&gt;- prong count&lt;br/&gt;- case items&lt;br/&gt;- prong bodies"]</literallayout>
+<simpara>Exhaustiveness checking happens during semantic analysis (after ZIR generation) when types are known. The compiler verifies that:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>All enum tags are covered (or an <literal>else</literal> branch exists)</simpara>
+</listitem>
+<listitem>
+<simpara>Integer ranges don&#8217;t overlap</simpara>
+</listitem>
+<listitem>
+<simpara>No unreachable prongs exist</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This is why you cannot accidentally forget a case in a <literal>switch</literal> over an enum—the type system ensures totality at compile time. Range syntax like <literal>0&#8230;&#8203;5</literal> is encoded in the ZIR as a range case, not as individual values.</simpara>
+</section>
+</section>
+</chapter>
+<chapter xml:id="section-2">
+<title>Workflow Patterns</title>
+<simpara>Combining these constructs unlocks more expressive pipelines: loops gather or filter data, <literal>switch</literal> routes actions, and loop labels keep nested flows precise without introducing mutable sentinels. This section chains the primitives into reusable patterns you can adapt for parsing, simulation, or state machines.</simpara>
+<section xml:id="workflow-1">
+<title>Script Processing with <literal>break</literal> Values</title>
+<simpara>This example interprets a mini instruction stream, using a labeled <literal>for</literal> loop to maintain a running total and stop when a threshold is reached. The <literal>switch</literal> handles command dispatch, including a deliberate <literal>unreachable</literal> when an unknown tag appears during development.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 02__control-flow-essentials.adoc - include::example$chapters-data/code/02__control-flow-essentials/script_runner.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run script_runner.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">stopped at step 3 with total 7</programlisting>
+</para>
+</formalpara>
+<simpara>The <literal>break :outer</literal> returns a full <literal>Outcome</literal> struct, making the loop act like a search that either finds its target or falls back to the loop&#8217;s <literal>else</literal>. The explicit <literal>unreachable</literal> documents assumptions for future contributors and activates safety checks in debug builds.</simpara>
+</section>
+<section xml:id="workflow-2">
+<title>Loop Guards and Early Termination</title>
+<simpara>Sometimes the data itself signals when to stop. This walkthrough identifies the first negative number, then accumulates even values until a <literal>0</literal> sentinel appears, demonstrating loop <literal>else</literal> clauses, labeled <literal>continue</literal>, and conventional <literal>break</literal>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 02__control-flow-essentials.adoc - include::example$chapters-data/code/02__control-flow-essentials/range_scan.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run range_scan.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">first negative at index 3
+encountered zero, breaking out
+sum of even prefix values = 16</programlisting>
+</para>
+</formalpara>
+<simpara>The two loops showcase complementary exit styles: a loop expression with an <literal>else</literal> default, and a labeled loop where <literal>continue</literal> and <literal>break</literal> spell out which iterations contribute to the running total.</simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Prefer labeled loops for clarity any time you have nested iteration; it keeps <literal>break</literal>/<literal>continue</literal> explicit and avoids sentinel variables.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>switch</literal> must remain exhaustive—if you rely on <literal>else</literal>, document the invariant with comments or <literal>unreachable</literal> so future cases are not silently ignored.</simpara>
+</listitem>
+<listitem>
+<simpara>Loop <literal>else</literal> clauses are evaluated only when the loop exits naturally; make sure your <literal>break</literal> paths return values to avoid falling back to unintended defaults.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>branching.zig</literal> with a third branch that formats values greater than 100 differently, confirming the <literal>if</literal> expression still returns a single string.</simpara>
+</listitem>
+<listitem>
+<simpara>Adapt <literal>loop_labels.zig</literal> to return the exact coordinates as a struct via <literal>break :outer</literal>, then print them from <literal>main</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Modify <literal>script_runner.zig</literal> to parse characters at runtime (for example, from a byte slice) and add a new command that resets the total, ensuring the <literal>switch</literal> stays exhaustive.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

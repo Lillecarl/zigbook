@@ -1,0 +1,247 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Networking, HTTP, and JSON</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>This chapter graduates from local files and threads to sockets, using Zig&#8217;s <literal>std.net</literal> and <literal>std.http</literal> packages to move data between processes in a disciplined way. For background, see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/net.zig">net.zig</link>. We will build a minimal loopback server, explore handshakes, and layer an HTTP/JSON workflow on top to demonstrate how these pieces compose.</simpara>
+<simpara>Zig 0.15.2&#8217;s I/O redesign removes legacy buffered helpers, so we will adopt the modern <literal>std.Io.Reader</literal>/<literal>std.Io.Writer</literal> interface and show how to manage framing manually when necessary. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/Reader.zig">Reader.zig</link> and <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link>.</simpara>
+<section xml:id="_the_network_stack_architecture">
+<title>The Network Stack Architecture</title>
+<simpara>Before diving into socket code, it&#8217;s essential to understand how <literal>std.net</literal> fits into Zig&#8217;s standard library architecture. The following diagram shows the complete layering from high-level networking APIs down to system calls:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "User Code"
+        APP[Application Code]
+    end
+
+    subgraph "High-Level APIs (lib/std)"
+        FS["std.fs&lt;br/&gt;(fs.zig)"]
+        NET["std.net&lt;br/&gt;(net.zig)"]
+        PROCESS["std.process&lt;br/&gt;(process.zig)"]
+        FMT["std.fmt&lt;br/&gt;(fmt.zig)"]
+        HEAP["std.heap&lt;br/&gt;(heap.zig)"]
+    end
+
+    subgraph "Mid-Level Abstractions"
+        POSIX["std.posix&lt;br/&gt;(posix.zig)&lt;br/&gt;Cross-platform POSIX API"]
+        OS["std.os&lt;br/&gt;(os.zig)&lt;br/&gt;OS-specific wrappers"]
+        MEM["std.mem&lt;br/&gt;(mem.zig)&lt;br/&gt;Memory utilities"]
+        DEBUG["std.debug&lt;br/&gt;(debug.zig)&lt;br/&gt;Stack traces, assertions"]
+    end
+
+    subgraph "Platform Layer"
+        LINUX["std.os.linux&lt;br/&gt;(os/linux.zig)&lt;br/&gt;Direct syscalls"]
+        WINDOWS["std.os.windows&lt;br/&gt;(os/windows.zig)&lt;br/&gt;Win32 APIs"]
+        WASI["std.os.wasi&lt;br/&gt;(os/wasi.zig)&lt;br/&gt;WASI APIs"]
+        LIBC["std.c&lt;br/&gt;(c.zig)&lt;br/&gt;C interop"]
+    end
+
+    subgraph "System Layer"
+        SYSCALL["System Calls"]
+        KERNEL["Operating System"]
+    end
+
+    APP --&gt; FS
+    APP --&gt; NET
+    APP --&gt; PROCESS
+    APP --&gt; FMT
+    APP --&gt; HEAP
+
+    FS --&gt; POSIX
+    NET --&gt; POSIX
+    PROCESS --&gt; POSIX
+    FMT --&gt; MEM
+    HEAP --&gt; MEM
+
+    POSIX --&gt; OS
+    OS --&gt; LIBC
+    OS --&gt; LINUX
+    OS --&gt; WINDOWS
+    OS --&gt; WASI
+
+    DEBUG --&gt; OS
+
+    LINUX --&gt; SYSCALL
+    WINDOWS --&gt; SYSCALL
+    WASI --&gt; SYSCALL
+    LIBC --&gt; SYSCALL
+
+    SYSCALL --&gt; KERNEL</literallayout>
+<simpara>This layered design mirrors the filesystem architecture from Chapter 28: <literal>std.net</literal> provides high-level, portable networking abstractions (Address, Stream, Server), which flow through <literal>std.posix</literal> for cross-platform POSIX socket compatibility, which then dispatches to platform-specific implementations—either direct syscalls on Linux (<literal>socket</literal>, <literal>bind</literal>, <literal>listen</literal>, <literal>accept</literal>) or Win32 Winsock APIs on Windows. When you call <literal>Address.listen()</literal>, the request traverses these layers: <literal>std.net.Address</literal> → <literal>std.posix.socket()</literal> → <literal>std.os.linux.socket()</literal> (or <literal>std.os.windows.WSASocketW()</literal>) → kernel. This explains why WASI builds fail on socket operations—the WASI layer lacks socket support in most runtimes. Understanding this architecture helps you reason about error handling (errors bubble up from syscalls), debug platform-specific issues, and make informed decisions about libc linking for maximum portability.</simpara>
+</section>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<simpara>The goals in this module revolve around the networking primitives in <literal>std.net</literal> and the HTTP stack built on them (<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/http/Server.zig">Server.zig</link>, <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/http/Client.zig">Client.zig</link>). You will learn how to:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Compose a loopback service with <literal>std.net.Address.listen</literal> that promptly accepts connections and coordinates readiness with <literal>std.Thread.ResetEvent</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Implement newline-oriented framing using the new <literal>std.Io.Reader</literal> helpers rather than deprecated buffered adapters.</simpara>
+</listitem>
+<listitem>
+<simpara>Call <literal>std.http.Client.fetch</literal>, capture the response stream, and parse JSON payloads with <literal>std.json</literal> utilities. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json.zig">json.zig</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="socket-building-blocks">
+<title>Socket building blocks</title>
+<simpara><literal>std.net</literal> exposes cross-platform TCP primitives that mirror the POSIX socket lifecycle while integrating with Zig&#8217;s error semantics and resource management. Pairing them with <literal>std.Thread.ResetEvent</literal> lets us synchronise a server thread&#8217;s readiness with a client, without resorting to polling. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Thread/ResetEvent.zig">ResetEvent.zig</link></simpara>
+<section xml:id="loopback-handshake">
+<title>Loopback handshake walkthrough</title>
+<simpara>The following example binds to <literal>127.0.0.1</literal>, accepts a single client, and echoes the trimmed line it received. Because Zig&#8217;s reader API no longer offers convenience line readers, the sample implements a <literal>readLine</literal> helper with <literal>Reader.takeByte</literal>, demonstrating how to build that functionality directly.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 31__networking-http-and-json.adoc - include::example$chapters-data/code/31__networking-http-and-json/01_loopback_ping.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 01_loopback_ping.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">loopback handshake succeeded
+client received: server observed "ping over loopback"</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>std.Thread.ResetEvent</literal> provides an inexpensive latch for announcing that the server thread reached <literal>accept</literal>, ensuring the client connection attempt does not race ahead.</simpara>
+</tip>
+</section>
+<section xml:id="manual-framing">
+<title>Managing framing explicitly</title>
+<simpara>Reading a line requires awareness of how the new reader interface delivers bytes: <literal>takeByte</literal> yields one byte at a time and reports <literal>error.EndOfStream</literal>, which we convert to either <literal>null</literal> (no data) or a completed slice. This manual framing encourages you to think about protocol boundaries rather than relying on an implicit buffered reader, and mirrors the intent of the 0.15.2 I/O overhaul.</simpara>
+</section>
+</chapter>
+<chapter xml:id="http-pipeline">
+<title>HTTP pipelines in Zig</title>
+<simpara>With sockets in hand, we can step up a level: Zig&#8217;s standard library ships an HTTP server and client implemented entirely in Zig, letting you serve endpoints and perform requests without third-party dependencies.</simpara>
+<section xml:id="http-serve">
+<title>Serving JSON from a loopback listener</title>
+<simpara>The server thread in the next example wraps the accepted stream with <literal>std.http.Server</literal>, parses one request, and emits a compact JSON body. Notice how we pre-render the response into a fixed buffer, so <literal>request.respond</literal> can advertise the content length accurately. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/Writer.zig">Writer.zig</link></simpara>
+</section>
+<section xml:id="http-fetch-json">
+<title>Fetching and decoding with <literal>std.http.Client</literal></title>
+<simpara>The companion client uses <literal>std.http.Client.fetch</literal> to perform a GET request, collects the body via a fixed writer and decodes it into a strongly typed struct using <literal>std.json.parseFromSlice</literal>. The same routine can be extended to follow redirects, stream large payloads, or negotiate TLS, depending on your needs. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json/static.zig">static.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 31__networking-http-and-json.adoc - include::example$chapters-data/code/31__networking-http-and-json/02_http_fetch_and_json.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 02_http_fetch_and_json.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">status: 200
+service: loopback-api
+method: GET
+path: /stats
+message: hello from Zig HTTP server</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara><literal>Client.fetch</literal> defaults to keep-alive connections and automatically reuses sockets from its pool. When you feed it a fixed writer, the writer returns <literal>error.WriteFailed</literal> if your buffer is too small. Size it to cover the payload you expect, or fall back to an allocator-backed writer.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="json-tooling">
+<title>JSON tooling essentials</title>
+<simpara><literal>std.json.Stringify</literal> and <literal>std.json.parseFromSlice</literal> let you stay in typed Zig data while emitting or consuming JSON text, provided you pay attention to allocation strategy. In these examples, we employ <literal>std.Io.Writer.fixed</literal> to build bodies without heap activity, and we release parse results with <literal>Parsed.deinit()</literal> once done. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json/Stringify.zig">Stringify.zig</link></simpara>
+<section xml:id="_understanding_the_writer_abstraction">
+<title>Understanding the Writer Abstraction</title>
+<simpara>Both HTTP response generation and JSON serialization rely on Zig&#8217;s Writer interface. The following diagram shows the writer abstraction and its key implementations:</simpara>
+<literallayout class="monospaced">graph TB
+    WRITER["Writer"]
+
+    subgraph "Writer Types"
+        FIXED["fixed(buffer)"]
+        ALLOC["Allocating"]
+        DISCARD["Discarding"]
+    end
+
+    WRITER --&gt; FIXED
+    WRITER --&gt; ALLOC
+    WRITER --&gt; DISCARD
+
+    subgraph "Write Methods"
+        PRINT["print(fmt, args)"]
+        PRINTVAL["printValue(specifier, options, value, depth)"]
+        PRINTINT["printInt(value, base, case, options)"]
+        WRITEBYTE["writeByte(byte)"]
+        WRITEALL["writeAll(bytes)"]
+    end
+
+    WRITER --&gt; PRINT
+    WRITER --&gt; PRINTVAL
+    WRITER --&gt; PRINTINT
+    WRITER --&gt; WRITEBYTE
+    WRITER --&gt; WRITEALL</literallayout>
+<simpara>The Writer abstraction provides a unified interface for output operations, with three main implementation strategies. <emphasis role="strong">Fixed buffer writers</emphasis> (<literal>std.Io.Writer.fixed(buffer)</literal>) write to a pre-allocated buffer and return <literal>error.WriteFailed</literal> when the buffer is full—this is what the HTTP example uses to build response bodies with zero heap allocation. <emphasis role="strong">Allocating writers</emphasis> dynamically grow their buffer using an allocator, suitable for unbounded output like streaming large JSON documents. <emphasis role="strong">Discarding writers</emphasis> count bytes without storing them, useful for calculating content length before actually writing. The write methods provide a consistent API regardless of the underlying implementation: <literal>writeAll</literal> for raw bytes, <literal>print</literal> for formatted output, <literal>writeByte</literal> for single bytes, and specialized methods like <literal>printInt</literal> for numeric formatting. When you call <literal>std.json.stringify(value, .{}, writer)</literal>, the JSON serializer doesn&#8217;t care whether <literal>writer</literal> is fixed, allocating, or discarding—it just calls <literal>writeAll</literal> and the writer implementation handles the details. This is why the chapter mentions 'size it to cover the payload you expect or fall back to an allocator-backed writer'—you&#8217;re choosing between bounded fixed buffers (fast, no allocation, can overflow) and dynamic allocating buffers (flexible, heap overhead, no size limit).</simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>TCP loopback servers still block the current thread on <literal>accept</literal>; when targeting single-threaded builds, you must branch on <literal>builtin.single_threaded</literal> to avoid spawning. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig">builtin.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>The HTTP client rescans system trust stores the first time you make an HTTPS request; if you vend your own certificate bundle, toggle <literal>client.next_https_rescan_certs</literal> accordingly.</simpara>
+</listitem>
+<listitem>
+<simpara>The new I/O APIs expose raw buffers, so ensure your fixed writers and readers have enough capacity before reusing them across requests.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend the loopback handshake to accept multiple clients by storing handles in a slice and joining them after broadcasting a shutdown message. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Thread.zig">Thread.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Add a <literal>--head</literal> flag to the HTTP example that issues a <literal>HEAD</literal> request and prints the negotiated headers, inspecting <literal>Response.head</literal> for metadata.</simpara>
+</listitem>
+<listitem>
+<simpara>Replace the manual <literal>readLine</literal> helper with <literal>Reader.discardDelimiterLimit</literal> to compare behaviour and error handling under the new I/O contracts.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Not every Zig target supports sockets; WASI builds, for instance, will fail during <literal>Address.listen</literal>, so guard availability by inspecting the target OS tag.</simpara>
+</listitem>
+<listitem>
+<simpara>TLS requests require a certificate bundle; embed one with <literal>Client.ca_bundle</literal> when running in environments without system stores (CI, containers, early boot environments).</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.json.parseFromSlice</literal> loads the whole document into memory; for large payloads prefer the streaming <literal>std.json.Scanner</literal> API to process tokens incrementally. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json/Scanner.zig">Scanner.zig</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="summary">
+<title>Summary</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.net</literal> and <literal>std.Io.Reader</literal> give you the raw tools to accept connections, manage framing, and synchronise readiness across threads in a predictable way.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.http.Server</literal> and <literal>std.http.Client</literal> sit naturally atop <literal>std.net</literal>, providing composable building blocks for REST-style services without external dependencies.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.json</literal> rounds out the story by turning on-wire data into typed structs and back, keeping ownership explicit so you can choose between fixed buffers and heap-backed writers.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

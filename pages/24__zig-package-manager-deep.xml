@@ -1,0 +1,513 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Zig Package Manager &amp; <literal>build.zig.zon</literal> (Deep)</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Chapter 22 introduced the build system&#8217;s API for creating artifacts and configuring builds; Chapter 23 demonstrated workspace organization with libraries and executables.This chapter completes the build system foundation by examining <emphasis role="strong">dependency management</emphasis>—how Zig projects declare, fetch, verify, cache, and integrate external packages through the <literal>build.zig.zon</literal> manifest and the package manager built into the Zig toolchain. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build.zig">Build.zig</link></simpara>
+<simpara>Unlike traditional package managers that operate as separate tools with their own metadata formats and resolution algorithms, Zig&#8217;s package manager is an integral part of the build system itself, leveraging the same deterministic caching infrastructure used for compilation artifacts (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build/Cache.zig">Cache.zig</link>). The <literal>build.zig.zon</literal> file—a Zig Object Notation (ZON) document—serves as the single source of truth for package metadata, dependency declarations, and inclusion rules, while <literal>build.zig</literal> orchestrates how those dependencies integrate into your project&#8217;s module graph. <link xl:href="20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml">20</link>
+By the end of this chapter, you will understand the full lifecycle of a dependency: from declaration in <literal>build.zig.zon</literal>, through cryptographic verification and caching, to module registration and import in your Zig source code. You will also learn patterns for reproducible builds, lazy dependency loading, and local development workflows that balance convenience with security.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Understand the structure and semantics of <literal>build.zig.zon</literal> manifest files (see <link xl:href="https://github.com/ziglang/zig/blob/master/lib/init/build.zig.zon">build.zig.zon template</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Declare dependencies using URL-based fetching and path-based local references.</simpara>
+</listitem>
+<listitem>
+<simpara>Explain the role of cryptographic hashes in dependency verification and content-addressing.</simpara>
+</listitem>
+<listitem>
+<simpara>Navigate the dependency resolution pipeline from fetch to cache to availability.</simpara>
+</listitem>
+<listitem>
+<simpara>Integrate fetched dependencies into <literal>build.zig</literal> using <literal>b.dependency()</literal> and <literal>b.lazyDependency()</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Differentiate between eager and lazy dependency loading strategies.</simpara>
+</listitem>
+<listitem>
+<simpara>Understand reproducibility guarantees: lockfiles, hash verification, and deterministic manifests.</simpara>
+</listitem>
+<listitem>
+<simpara>Work with the global package cache and understand offline build workflows.</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>zig fetch</literal> commands for dependency management.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="build-zig-zon-schema">
+<title>The <literal>build.zig.zon</literal> Schema</title>
+<simpara>The <literal>build.zig.zon</literal> file is a Zig-native data format—essentially a single anonymous struct literal—that describes package metadata. It is parsed by the Zig compiler at build time, providing strong typing and familiar syntax while remaining human-readable and simple to author. Unlike JSON or TOML, ZON benefits from Zig&#8217;s compile-time evaluation, allowing structured data to be validated and transformed during the build process.</simpara>
+<section xml:id="minimal-manifest">
+<title>Minimal Manifest</title>
+<simpara>Every <literal>build.zig.zon</literal> file must declare at least the package name, version, and minimum supported Zig version:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 24__zig-package-manager-deep.adoc - include::example$chapters-data/code/24__zig-package-manager-deep/01_minimal_manifest.zig.zon[]</programlisting>
+<simpara>The <literal>.paths</literal> field specifies which files and directories are included when this package is fetched by another project. This inclusion list directly affects the computed package hash—only listed files contribute to the hash, ensuring deterministic content addressing.</simpara>
+<tip>
+<simpara>The <literal>.paths</literal> field acts as both an inclusion filter and a documentation aid. Always list <literal>build.zig</literal>, <literal>build.zig.zon</literal>, and your source directories. Exclude generated files, test artifacts, and editor-specific files that should not be part of the package&#8217;s canonical content.</simpara>
+</tip>
+</section>
+<section xml:id="package-identity-fields">
+<title>Package Identity and Versioning</title>
+<simpara>The <literal>.name</literal> and <literal>.version</literal> fields together establish package identity. As of Zig 0.15.2, the package manager does not yet perform automatic version resolution or deduplication, but these fields prepare for future enhancements and help human maintainers understand package relationships.</simpara>
+<simpara>The <literal>.minimum_zig_version</literal> field communicates compatibility expectations. When a package declares a minimum version, the build system will refuse to proceed if the current Zig toolchain is older, preventing obscure compilation failures due to missing features or changed semantics.</simpara>
+<simpara>The <literal>.fingerprint</literal> field (omitted in the minimal example but shown in the template) is a unique identifier generated once when the package is created and never changed thereafter. This fingerprint enables unambiguous detection of package forks and updates, protecting against hostile forks that attempt to impersonate upstream projects.</simpara>
+<warning>
+<simpara>Changing the <literal>.fingerprint</literal> has security and trust implications. It signals that this package is a distinct entity from its origin, which may break trust chains and confuse dependency resolution in future Zig versions.</simpara>
+</warning>
+</section>
+<section xml:id="declaring-dependencies">
+<title>Declaring Dependencies</title>
+<simpara>Dependencies are declared in the <literal>.dependencies</literal> struct. Each dependency must provide either a <literal>.url</literal> and <literal>.hash</literal> pair (for remote packages) or a <literal>.path</literal> (for local packages):</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 24__zig-package-manager-deep.adoc - include::example$chapters-data/code/24__zig-package-manager-deep/02_with_dependency.zig.zon[]</programlisting>
+<simpara>URL-based dependencies are fetched from the network, verified against the provided hash, and cached globally. Path-based dependencies reference a directory relative to the build root, useful during local development or when vendoring dependencies.</simpara>
+<simpara>The hash uses the multihash format, where the prefix <literal>1220</literal> indicates SHA-256. This content-addressed approach ensures that packages are identified by their contents rather than their URLs, making the package manager resilient to URL changes and mirror availability.</simpara>
+<important>
+<simpara>The <literal>.hash</literal> field is the source of truth—packages do not come from a URL; they come from a hash. The URL is merely one possible mirror for obtaining content that matches the hash. This design separates package identity (content) from package location (URL).</simpara>
+</important>
+</section>
+<section xml:id="lazy-dependencies">
+<title>Lazy vs Eager Dependencies</title>
+<simpara>By default, all declared dependencies are <emphasis role="strong">eager</emphasis>: they are fetched and verified before the build script runs. For optional dependencies that are only needed under certain conditions (e.g., debugging tools, benchmarking utilities, or platform-specific extensions), you can mark them as <emphasis role="strong">lazy</emphasis> with <literal>.lazy = true</literal>:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 24__zig-package-manager-deep.adoc - include::example$chapters-data/code/24__zig-package-manager-deep/03_lazy_dependency.zig.zon[]</programlisting>
+<simpara>Lazy dependencies are not fetched until <literal>build.zig</literal> explicitly requests them via <literal>b.lazyDependency()</literal>. If the build script never calls <literal>lazyDependency()</literal> for a given package, that package remains unfetched, saving download time and disk space.</simpara>
+<simpara>This two-phase approach allows the build script to declare optional dependencies without forcing all users to download them. When a lazy dependency is requested but not yet available, the build runner will fetch it, then re-run the build script—a transparent process that balances flexibility with determinism.</simpara>
+</section>
+</chapter>
+<chapter xml:id="resolution-pipeline">
+<title>Dependency Resolution Pipeline</title>
+<simpara>Understanding how Zig transforms a <literal>.dependencies</literal> declaration into a usable module illuminates the package manager&#8217;s design and helps debug fetch failures or integration issues.</simpara>
+<section xml:id="parse-and-validate">
+<title>1. Parse and Validate</title>
+<simpara>When you run <literal>zig build</literal>, the compiler first parses <literal>build.zig.zon</literal> as a ZON literal (see <link xl:href="https://github.com/ziglang/zig/blob/master/lib/compiler/build_runner.zig">build_runner.zig</link>). This parse step validates syntax and ensures all required fields are present. The compiler checks:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Each dependency has either <literal>.url</literal>+<literal>.hash</literal> or <literal>.path</literal> (but not both)</simpara>
+</listitem>
+<listitem>
+<simpara>Hash strings use valid multihash encoding</simpara>
+</listitem>
+<listitem>
+<simpara>The <literal>.minimum_zig_version</literal> is not newer than the running toolchain</simpara>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="fetch-and-verify">
+<title>2. Fetch and Verify</title>
+<simpara>For each <emphasis role="strong">eager</emphasis> dependency with a <literal>.url</literal>, the build runner:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>Computes a unique cache key from the hash</simpara>
+</listitem>
+<listitem>
+<simpara>Checks if the package exists in the global cache (<literal>~/.cache/zig/p/&lt;hash&gt;/</literal> on Unix-like systems)</simpara>
+</listitem>
+<listitem>
+<simpara>If not cached, downloads the URL contents</simpara>
+</listitem>
+<listitem>
+<simpara>Extracts the archive if needed (supports <literal>.tar.gz</literal>, <literal>.tar.xz</literal>, <literal>.zip</literal>)</simpara>
+</listitem>
+<listitem>
+<simpara>Applies the <literal>.paths</literal> filter from the dependency&#8217;s own <literal>build.zig.zon</literal></simpara>
+</listitem>
+<listitem>
+<simpara>Computes the hash of the filtered content</simpara>
+</listitem>
+<listitem>
+<simpara>Verifies it matches the declared <literal>.hash</literal> field</simpara>
+</listitem>
+<listitem>
+<simpara>Stores the verified content in the global cache</simpara>
+</listitem>
+</orderedlist>
+<simpara>If hash verification fails, the build aborts with a clear error message indicating hash mismatch. This prevents supply-chain attacks where a compromised mirror serves different content.</simpara>
+<simpara>Path-based dependencies skip the fetch step—they are always available relative to the build root.</simpara>
+</section>
+<section xml:id="cache-lookup">
+<title>3. Cache Lookup and Reuse</title>
+<simpara>Once a package is cached, subsequent builds reuse the cached version without re-downloading or re-verifying. The global cache is shared across all Zig projects on the system, so fetching a popular dependency once benefits all projects.</simpara>
+<simpara>The cache directory structure is content-addressed: each package&#8217;s hash directly maps to a cache subdirectory. This makes cache management transparent and predictable—you can inspect cached packages or clear the cache without risk of corrupting build state.</simpara>
+</section>
+<section xml:id="dependency-graph-construction">
+<title>4. Dependency Graph Construction</title>
+<simpara>After all eager dependencies are available, the build runner constructs a dependency graph. Each package&#8217;s <literal>build.zig</literal> is loaded as a Zig module, and the <literal>build()</literal> function is called to register artifacts and steps.</simpara>
+<simpara>Lazy dependencies are <emphasis role="strong">not</emphasis> loaded at this stage. Instead, the build runner marks them as "potentially needed" and proceeds. If <literal>build.zig</literal> calls <literal>b.lazyDependency()</literal> for a lazy package that hasn&#8217;t been fetched yet, the build runner records the request, completes the current build pass, fetches the lazy dependencies, and re-runs the build script.</simpara>
+<simpara>This deferred-fetch mechanism allows build scripts to conditionally load dependencies based on user options or target characteristics without forcing all users to download every optional package.</simpara>
+<simpara>Internally, Zig records dependencies on ZON manifests and other dependees inside the <literal>InternPool</literal>, so that changes to <literal>build.zig.zon</literal> or embedded files can invalidate only the analysis units that depend on them:</simpara>
+<literallayout class="monospaced">graph TB
+   subgraph "InternPool - Dependency Storage"
+      SRCHASHDEPS["src_hash_deps&lt;br/&gt;Map: TrackedInst.Index → DepEntry.Index"]
+      NAVVALDEPS["nav_val_deps&lt;br/&gt;Map: Nav.Index → DepEntry.Index"]
+      NAVTYDEPS["nav_ty_deps&lt;br/&gt;Map: Nav.Index → DepEntry.Index"]
+      INTERNEDDEPS["interned_deps&lt;br/&gt;Map: Index → DepEntry.Index"]
+      ZONFILEDEPS["zon_file_deps&lt;br/&gt;Map: FileIndex → DepEntry.Index"]
+      EMBEDFILEDEPS["embed_file_deps&lt;br/&gt;Map: EmbedFile.Index → DepEntry.Index"]
+      NSDEPS["namespace_deps&lt;br/&gt;Map: TrackedInst.Index → DepEntry.Index"]
+      NSNAMEDEPS["namespace_name_deps&lt;br/&gt;Map: NamespaceNameKey → DepEntry.Index"]
+
+      FIRSTDEP["first_dependency&lt;br/&gt;Map: AnalUnit → DepEntry.Index"]
+      DEPENTRIES["dep_entries&lt;br/&gt;ArrayListUnmanaged&lt;DepEntry&gt;"]
+      FREEDEP["free_dep_entries&lt;br/&gt;ArrayListUnmanaged&lt;DepEntry.Index&gt;"]
+   end
+
+   subgraph "DepEntry Structure"
+      DEPENTRY["DepEntry&lt;br/&gt;{depender: AnalUnit,&lt;br/&gt;next_dependee: DepEntry.Index.Optional,&lt;br/&gt;next_depender: DepEntry.Index.Optional}"]
+   end
+
+   SRCHASHDEPS --&gt; DEPENTRIES
+   NAVVALDEPS --&gt; DEPENTRIES
+   NAVTYDEPS --&gt; DEPENTRIES
+   INTERNEDDEPS --&gt; DEPENTRIES
+   ZONFILEDEPS --&gt; DEPENTRIES
+   EMBEDFILEDEPS --&gt; DEPENTRIES
+   NSDEPS --&gt; DEPENTRIES
+   NSNAMEDEPS --&gt; DEPENTRIES
+   FIRSTDEP --&gt; DEPENTRIES
+
+   DEPENTRIES --&gt; DEPENTRY
+   FREEDEP -.-&gt;|"reuses indices from"| DEPENTRIES</literallayout>
+<simpara>ZON files participate in the same incremental compilation graph as source hashes and embedded files: updating <literal>build.zig.zon</literal> updates the corresponding <literal>zon_file_deps</literal> entries, which in turn mark dependent analysis units and build steps as outdated.</simpara>
+<simpara>More broadly, ZON manifests are just one of several <emphasis role="strong">dependee</emphasis> categories that the compiler tracks; at a high level these groups look like this:</simpara>
+<literallayout class="monospaced">graph LR
+   subgraph "Source-Level Dependencies"
+      SRCHASH["Source Hash&lt;br/&gt;TrackedInst.Index&lt;br/&gt;src_hash_deps"]
+      ZONFILE["ZON File&lt;br/&gt;FileIndex&lt;br/&gt;zon_file_deps"]
+      EMBEDFILE["Embedded File&lt;br/&gt;EmbedFile.Index&lt;br/&gt;embed_file_deps"]
+   end
+
+   subgraph "Nav Dependencies"
+      NAVVAL["Nav Value&lt;br/&gt;Nav.Index&lt;br/&gt;nav_val_deps"]
+      NAVTY["Nav Type&lt;br/&gt;Nav.Index&lt;br/&gt;nav_ty_deps"]
+   end
+
+   subgraph "Type/Value Dependencies"
+      INTERNED["Interned Value&lt;br/&gt;Index&lt;br/&gt;interned_deps&lt;br/&gt;runtime funcs, container types"]
+   end
+
+   subgraph "Namespace Dependencies"
+      NSFULL["Full Namespace&lt;br/&gt;TrackedInst.Index&lt;br/&gt;namespace_deps"]
+      NSNAME["Namespace Name&lt;br/&gt;NamespaceNameKey&lt;br/&gt;namespace_name_deps"]
+   end
+
+   subgraph "Memoized State"
+      MEMO["Memoized Fields&lt;br/&gt;panic_messages, etc."]
+   end</literallayout>
+<simpara>The package manager sits on top of this infrastructure: <literal>.dependencies</literal> entries in <literal>build.zig.zon</literal> ultimately translate into ZON-file dependees and cached content that participate in the same dependency system.</simpara>
+</section>
+<section xml:id="conceptual-example">
+<title>Conceptual Example: Resolution Pipeline</title>
+<simpara>The following example demonstrates the logical flow of dependency resolution:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 24__zig-package-manager-deep.adoc - include::example$chapters-data/code/24__zig-package-manager-deep/07_resolution_pipeline_demo.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 07_resolution_pipeline_demo.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">=== Zig Package Manager Resolution Pipeline ===
+
+1. Parse build.zig.zon dependencies
+
+2. Resolve eager dependencies
+   - core: local path '../core' → available
+   - utils: fetching → verifying → cached → available
+
+3. Lazy dependencies (deferred until used)
+   - optional_viz: waiting for lazyDependency() call
+
+4. Build script requests lazy dependency
+   - optional_viz requested → fetching now
+
+5. Cache locations
+   - Global: ~/.cache/zig/p/&lt;hash&gt;/
+   - Project: .zig-cache/
+
+=== Resolution Complete ===</programlisting>
+</para>
+</formalpara>
+<simpara>This conceptual model matches the actual implementation in the build runner and standard library.</simpara>
+</section>
+</chapter>
+<chapter xml:id="integrating-dependencies">
+<title>Integrating Dependencies in <literal>build.zig</literal></title>
+<simpara>Declaring a dependency in <literal>build.zig.zon</literal> makes it available for fetching; integrating it into your build requires calling <literal>b.dependency()</literal> or <literal>b.lazyDependency()</literal> in <literal>build.zig</literal> to obtain a <literal>*std.Build.Dependency</literal> handle, then extracting modules or artifacts from that dependency.</simpara>
+<section xml:id="basic-dependency-usage">
+<title>Using <literal>b.dependency()</literal></title>
+<simpara>For eager dependencies, use <literal>b.dependency(name, args)</literal> where <literal>name</literal> matches a key in <literal>.dependencies</literal> and <literal>args</literal> is a struct containing build options to pass down to the dependency&#8217;s build script:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 24__zig-package-manager-deep.adoc - include::example$chapters-data/code/24__zig-package-manager-deep/04_build_with_dependency.zig[]</programlisting>
+<simpara>The <literal>b.dependency()</literal> call returns a <literal>*Dependency</literal>, which provides methods to access the dependency&#8217;s artifacts (<literal>.artifact()</literal>), modules (<literal>.module()</literal>), lazy paths (<literal>.path()</literal>), and named write-files (<literal>.namedWriteFiles()</literal>).</simpara>
+<simpara>The <literal>args</literal> parameter forwards build options to the dependency, allowing you to configure the dependency&#8217;s target, optimization level, or custom features. This ensures the dependency is built with compatible settings.</simpara>
+<tip>
+<simpara>Always pass <literal>.target</literal> and <literal>.optimize</literal> to dependencies unless you have a specific reason not to. Mismatched target settings can cause link errors or subtle ABI incompatibilities.</simpara>
+</tip>
+</section>
+<section xml:id="lazy-dependency-usage">
+<title>Using <literal>b.lazyDependency()</literal></title>
+<simpara>For lazy dependencies, use <literal>b.lazyDependency(name, args)</literal> instead. This function returns <literal>?*Dependency</literal>—<literal>null</literal> if the dependency has not yet been fetched:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 24__zig-package-manager-deep.adoc - include::example$chapters-data/code/24__zig-package-manager-deep/05_lazy_dependency_usage.zig[]</programlisting>
+<simpara>When <literal>lazyDependency()</literal> returns <literal>null</literal>, the build runner records the request and re-runs the build script after fetching the missing dependency. On the second pass, <literal>lazyDependency()</literal> will succeed, and the build proceeds normally.</simpara>
+<simpara>This pattern allows build scripts to conditionally include optional features without forcing all users to fetch those dependencies:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build                          # Core functionality only
+$ zig build -Dbenchmarks=true        # Fetches benchmark_utils if needed
+$ zig build -Ddebug-viz=true         # Fetches debug_visualizer if needed</programlisting>
+<caution>
+<simpara>Mixing <literal>b.dependency()</literal> and <literal>b.lazyDependency()</literal> for the same package is an error. If a dependency is marked <literal>.lazy = true</literal> in <literal>build.zig.zon</literal>, you <emphasis role="strong">must</emphasis> use <literal>b.lazyDependency()</literal>. If it&#8217;s eager (default), you <emphasis role="strong">must</emphasis> use <literal>b.dependency()</literal>. The build system enforces this to prevent inconsistent fetch behavior.</simpara>
+</caution>
+</section>
+</chapter>
+<chapter xml:id="hash-verification-and-multihash">
+<title>Hash Verification and Multihash Format</title>
+<simpara>Cryptographic hashes are central to Zig&#8217;s package manager, ensuring that fetched content matches expectations and protecting against tampering or corruption.</simpara>
+<section xml:id="multihash-format">
+<title>Multihash Format</title>
+<simpara>Zig uses the multihash format to encode hash digests. A multihash string consists of:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>A prefix indicating the hash algorithm (e.g., <literal>1220</literal> for SHA-256)</simpara>
+</listitem>
+<listitem>
+<simpara>The hex-encoded hash digest</simpara>
+</listitem>
+</orderedlist>
+<simpara>For SHA-256, the prefix <literal>1220</literal> breaks down as:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><literal>12</literal> (hex) = SHA-256 algorithm identifier</simpara>
+</listitem>
+<listitem>
+<simpara><literal>20</literal> (hex) = 32 bytes = SHA-256 digest length</simpara>
+</listitem>
+</itemizedlist>
+<simpara>The following example demonstrates conceptual hash computation (the actual implementation lives in the build runner and cache system):</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 24__zig-package-manager-deep.adoc - include::example$chapters-data/code/24__zig-package-manager-deep/06_hash_verification_example.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 06_hash_verification_example.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Package hash: 69b2de89d968f316b3679f2e68ecacb50fd3064e0e0ee7922df4e1ced43744d2
+Expected hash in build.zig.zon: 122069b2de89d968f316b3679f2e68ecacb50fd3064e0e0ee7922df4e1ced43744d2
+
+Note: The `1220` prefix indicates SHA-256 in multihash format.</programlisting>
+</para>
+</formalpara>
+<simpara>The compiler uses a similar "hash → compare → reuse" pattern for incremental compilation when deciding whether to reuse cached IR for a declaration:</simpara>
+<literallayout class="monospaced">graph TB
+   Process["Process declaration"] --&gt; UpdateHasher["src_hasher.update()"]
+
+   UpdateHasher --&gt; HashBytes["Hash relevant source bytes"]
+   HashBytes --&gt; HashDeps["Hash dependencies"]
+   HashDeps --&gt; FinalHash["Produce source hash"]
+
+   FinalHash --&gt; CompareOld["Compare with cached hash"]
+   CompareOld --&gt;|Different| Recompile["Invalidate and recompile"]
+   CompareOld --&gt;|Same| UseCached["Use cached ZIR/AIR"]</literallayout>
+<simpara>This is conceptually the same as package hashing: for both source and dependencies, Zig computes a content hash, compares it with a cached value, and either reuses cached artifacts or recomputes them.</simpara>
+<simpara>In practice, you rarely need to compute hashes manually. The <literal>zig fetch</literal> command automates this:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig fetch https://example.com/package.tar.gz</programlisting>
+<simpara>Zig downloads the package, computes the hash, and prints the complete multihash string you can copy into <literal>build.zig.zon</literal>.</simpara>
+<note>
+<simpara>The multihash format is forward-compatible with future hash algorithms. If Zig adopts SHA-3 or BLAKE3, new prefix codes will identify those algorithms without breaking existing manifests.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="reproducibility-guarantees">
+<title>Reproducibility and Deterministic Builds</title>
+<simpara>Reproducibility—the ability to recreate identical build outputs given the same inputs—is a cornerstone of reliable software distribution. Zig&#8217;s package manager contributes to reproducibility through content addressing, hash verification, and explicit versioning.</simpara>
+<section xml:id="content-addressing">
+<title>Content Addressing</title>
+<simpara>Because packages are identified by hash rather than URL, the package manager is inherently resilient to URL changes, mirror failures, and upstream relocations. As long as some mirror provides content matching the hash, the package is usable.</simpara>
+<simpara>This content-addressed design also prevents certain classes of supply-chain attacks: an attacker who compromises a single mirror cannot inject malicious code unless they also break the hash function (SHA-256), which is computationally infeasible.</simpara>
+<simpara>The same content-addressing principle appears elsewhere in Zig&#8217;s implementation: the <literal>InternPool</literal> stores each distinct type or value exactly once and identifies it by an index, with dependency tracking built on top of these content-derived keys rather than on file paths or textual names.</simpara>
+</section>
+<section xml:id="lockfile-semantics">
+<title>Lockfile Semantics and Transitive Dependencies</title>
+<simpara>As of Zig 0.15.2, the package manager does not generate a separate lockfile—<literal>build.zig.zon</literal> itself serves as the lockfile. Each dependency&#8217;s hash locks its content, and transitive dependencies are locked by the direct dependency&#8217;s hash (since the direct dependency&#8217;s <literal>build.zig.zon</literal> specifies its own dependencies).</simpara>
+<simpara>This approach simplifies the mental model: there is one source of truth (<literal>build.zig.zon</literal>), and the hash chain ensures transitivity without additional metadata files.</simpara>
+<simpara>Future Zig versions may introduce explicit lockfiles for advanced use cases (e.g., tracking resolved URLs or deduplicating transitive dependencies), but the core content-addressing principle will remain. <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link></simpara>
+</section>
+<section xml:id="offline-builds">
+<title>Offline Builds and Cache Portability</title>
+<simpara>Once all dependencies are cached, you can build offline indefinitely. The global cache persists across projects, so fetching a dependency once benefits all future projects that use it.</simpara>
+<simpara>To prepare for offline builds:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>Run <literal>zig build --fetch</literal> to fetch all declared dependencies without building</simpara>
+</listitem>
+<listitem>
+<simpara>Verify the cache is populated: <literal>ls ~/.cache/zig/p/</literal></simpara>
+</listitem>
+<listitem>
+<simpara>Disconnect from the network and run <literal>zig build</literal> normally</simpara>
+</listitem>
+</orderedlist>
+<simpara>If you need to transfer a project with its dependencies to an air-gapped environment, you can:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>Fetch all dependencies on a networked machine</simpara>
+</listitem>
+<listitem>
+<simpara>Archive the <literal>~/.cache/zig/p/</literal> directory</simpara>
+</listitem>
+<listitem>
+<simpara>Extract the archive on the air-gapped machine to the same cache location</simpara>
+</listitem>
+<listitem>
+<simpara>Run <literal>zig build</literal> normally</simpara>
+</listitem>
+</orderedlist>
+<note>
+<simpara>Path-based dependencies (<literal>.path = "&#8230;&#8203;"</literal>) do not require network access and work immediately offline.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="zig-fetch-commands">
+<title>Using <literal>zig fetch</literal> for Dependency Management</title>
+<simpara>The <literal>zig fetch</literal> command provides a CLI for managing dependencies without editing <literal>build.zig.zon</literal> manually.</simpara>
+<section xml:id="fetching-and-saving">
+<title>Fetching and Saving Dependencies</title>
+<simpara>To add a new dependency:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig fetch --save https://github.com/example/package/archive/v1.0.0.tar.gz</programlisting>
+<simpara>This command:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>Downloads the URL</simpara>
+</listitem>
+<listitem>
+<simpara>Computes the hash</simpara>
+</listitem>
+<listitem>
+<simpara>Adds an entry to <literal>.dependencies</literal> in <literal>build.zig.zon</literal></simpara>
+</listitem>
+<listitem>
+<simpara>Saves the package name and hash</simpara>
+</listitem>
+</orderedlist>
+<simpara>You can then reference the dependency by name in <literal>build.zig</literal>.</simpara>
+</section>
+<section xml:id="fetching-without-saving">
+<title>Fetching Without Saving</title>
+<simpara>To fetch a URL and print its hash without modifying <literal>build.zig.zon</literal>:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig fetch https://example.com/package.tar.gz</programlisting>
+<simpara>This is useful for verifying package integrity or preparing vendored dependencies.</simpara>
+</section>
+<section xml:id="recursive-fetch">
+<title>Recursive Fetch</title>
+<simpara>To fetch all dependencies transitively (including dependencies of dependencies):</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build --fetch</programlisting>
+<simpara>This populates the cache with everything needed for a complete build, ensuring offline builds will succeed.</simpara>
+</section>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara><emphasis role="strong">Minimal Package</emphasis>: Create a new Zig library with <literal>zig init-lib</literal>, examine the generated <literal>build.zig.zon</literal>, and explain the purpose of each top-level field. <link xl:href="21__zig-init-and-package-metadata.xml">21</link></simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Path-Based Dependency</emphasis>: Set up two sibling directories (<literal>mylib/</literal> and <literal>myapp/</literal>). Make <literal>myapp</literal> depend on <literal>mylib</literal> using <literal>.path</literal>, implement a simple function in <literal>mylib</literal>, call it from <literal>myapp</literal>, and build successfully.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Hash Verification Failure</emphasis>: Intentionally corrupt a dependency&#8217;s hash in <literal>build.zig.zon</literal> (change one character) and run <literal>zig build</literal>. Observe and interpret the error message.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Lazy Dependency Workflow</emphasis>: Create a project with a lazy dependency for a benchmarking module. Verify that <literal>zig build</literal> (without options) does not fetch the dependency, but <literal>zig build -Dbenchmarks=true</literal> does.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Cache Inspection</emphasis>: Run <literal>zig build --fetch</literal> on a project with remote dependencies, then explore the global cache directory (<literal>~/.cache/zig/p/</literal> on Unix). Identify the package directories by their hash prefixes.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Offline Build Test</emphasis>: Fetch all dependencies for a project, disconnect from the network (or block DNS resolution), and confirm <literal>zig build</literal> succeeds. Reconnect and add a new dependency to verify fetch works again.</simpara>
+</listitem>
+</orderedlist>
+</chapter>
+<chapter xml:id="notes-and-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">URL Stability</emphasis>: While content addressing makes the package manager resilient to URL changes, always prefer stable release URLs (tagged releases, not <literal>main</literal> branch archives) to minimize maintenance burden.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Path Dependencies in Distributed Packages</emphasis>: If your package uses <literal>.path</literal> dependencies, those paths must exist relative to the package root when fetched by consumers. Prefer URL-based dependencies for distributed packages to avoid path resolution issues.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Transitive Dependency Deduplication</emphasis>: Zig 0.15.2 does not deduplicate transitive dependencies with different hash strings, even if they refer to the same content. Future versions may implement smarter deduplication.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Security and Trust</emphasis>: Hash verification protects against transport corruption and most tampering, but does not validate package <emphasis role="strong">provenance</emphasis>. Trust the source of the hash (e.g., a project&#8217;s official repository or release page), not just any mirror.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Build Option Forwarding</emphasis>: When calling <literal>b.dependency()</literal>, carefully choose which build options to forward. Forwarding too many can cause build failures if the dependency doesn&#8217;t recognize an option; forwarding too few can result in mismatched configurations.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, Alternatives, and Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Lazy Dependency Refetch</emphasis>: If you delete a lazy dependency from the cache and re-run <literal>zig build</literal> without the option that triggers it, the dependency remains unfetched. Only when the build script calls <literal>lazyDependency()</literal> again will the fetch occur.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Hash Mismatches After Upstream Changes</emphasis>: If an upstream package changes its content without changing its version tag, and you re-fetch the URL, you&#8217;ll encounter a hash mismatch. Always delete the old <literal>.hash</literal> in <literal>build.zig.zon</literal> when updating a URL to signal that you expect new content.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Vendoring Dependencies</emphasis>: For projects with strict supply-chain requirements, consider vendoring dependencies by committing them to your repository (using <literal>.path</literal> references) instead of relying on URL-based fetches. This trades repository size for control.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Mirror Configuration</emphasis>: Zig 0.15.2 does not yet support mirror lists or fallback URLs per dependency. If your primary URL becomes unavailable, you must manually update <literal>build.zig.zon</literal> to a new URL (the hash remains the same, ensuring content integrity).</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Fingerprint Collisions</emphasis>: The <literal>.fingerprint</literal> field is a 64-bit value chosen randomly. Collisions are statistically unlikely but not impossible. Future Zig versions may detect and handle fingerprint conflicts during dependency resolution.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="summary">
+<title>Summary</title>
+<simpara>This chapter explored the full lifecycle of Zig package management:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong"><literal>build.zig.zon</literal> schema</emphasis>: Package metadata, dependency declarations, inclusion rules, and fingerprint identity.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Dependency types</emphasis>: URL-based vs path-based; eager vs lazy loading strategies.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Resolution pipeline</emphasis>: Parse → fetch → verify → cache → construct dependency graph.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Integration in <literal>build.zig</literal></emphasis>: Using <literal>b.dependency()</literal> and <literal>b.lazyDependency()</literal> to access modules and artifacts.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Hash verification</emphasis>: Multihash format, SHA-256 content addressing, supply-chain protection.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Reproducibility</emphasis>: Content addressing, lockfile semantics, offline builds, cache portability.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong"><literal>zig fetch</literal> commands</emphasis>: Adding, fetching, and verifying dependencies from the CLI.</simpara>
+</listitem>
+</itemizedlist>
+<simpara>You now have a complete mental model of Zig&#8217;s build system: artifact creation, workspace organization, and dependency management (this chapter). The next chapter will extend this foundation by diving deeper into module resolution mechanics and discovery patterns.</simpara>
+<simpara>Understanding the package manager&#8217;s design—content addressing, lazy loading, cryptographic verification—empowers you to build reproducible, secure, and maintainable Zig projects, whether working solo or integrating third-party libraries into production systems.</simpara>
+</chapter>
+</book>

@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>Path Utility (TDD)</subtitle>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>In this hands-on chapter, we build a tiny, allocator-friendly path helper that plays nicely with Zig’s standard library and works across platforms. We’ll develop it test-first—then also provide a small CLI demo so you can see actual output without a test harness. Along the way, we deliberately introduce a leak and watch Zig’s testing allocator catch it, then fix it and verify.</simpara>
+<simpara>The goal is not to replace <literal>std.fs.path</literal>, but to practice API design, test-driven development (TDD), and leak-safe allocation in a realistic, bite-sized utility. See <link xl:href="13__testing-and-leak-detection.xml">13__testing-and-leak-detection.xml</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/path.zig">path.zig</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Design a small, composable API: join, basename/dirpath, extension, and change extension.</simpara>
+</listitem>
+<listitem>
+<simpara>Use allocators correctly and avoid leaks under success and failure paths. <link xl:href="10__allocators-and-memory-management.xml">10__allocators-and-memory-management.xml</link></simpara>
+</listitem>
+<listitem>
+<simpara>Practice TDD with <literal>std.testing</literal>, and pair TDD with a <literal>zig run</literal> demo for visible output. <link xl:href="13__testing-and-leak-detection.xml">13__testing-and-leak-detection.xml</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="api-sketch">
+<title>A small API surface</title>
+<simpara>We’ll implement four helpers in the <literal>pathutil</literal> namespace:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><literal>joinAlloc(allocator, parts)</literal> → <literal>[]u8</literal>: join components with a single separator, preserving an absolute root</simpara>
+</listitem>
+<listitem>
+<simpara><literal>basename(path)</literal> → <literal>[]const u8</literal>: last component, ignoring trailing separators</simpara>
+</listitem>
+<listitem>
+<simpara><literal>dirpath(path)</literal> → <literal>[]const u8</literal>: directory part, no trailing separators ("." for bare names, "/" for root)</simpara>
+</listitem>
+<listitem>
+<simpara><literal>extname(path)</literal> → <literal>[]const u8</literal> and <literal>changeExtAlloc(allocator, path, new_ext)</literal> → <literal>[]u8</literal></simpara>
+</listitem>
+</itemizedlist>
+<simpara>These functions emphasize predictable, teaching-friendly behavior; for production-grade edge cases, prefer <literal>std.fs.path</literal>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 14__project-path-utility.adoc - include::example$chapters-data/code/14__project-path-utility-tdd/path_util.zig[]</programlisting>
+<note>
+<simpara>For pedagogy, we accept either <literal>'/'</literal> or <literal>'\\'</literal> as separators on any platform when parsing, but we always emit the local separator (<literal>std.fs.path.sep</literal>) when joining.</simpara>
+</note>
+</chapter>
+<chapter xml:id="demo-run">
+<title>Try it: run the demo (visible output)</title>
+<simpara>To keep output visible outside the test runner, here’s a tiny CLI that calls our helpers and prints the results.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 14__project-path-utility.adoc - include::example$chapters-data/code/14__project-path-utility-tdd/path_util_demo.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run chapters-data/code/14__project-path-utility-tdd/path_util_demo.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">join a,b,c =&gt; a/b/c
+join /,usr/,/bin =&gt; /usr/bin
+basename(/home/user/docs/report.txt) =&gt; report.txt
+dirpath(/home/user/docs/report.txt) =&gt; /home/user/docs
+extname(/home/user/docs/report.txt) =&gt; txt
+changeExt(/home/user/docs/report.txt, md) =&gt; /home/user/docs/report.md</programlisting>
+</para>
+</formalpara>
+</chapter>
+<chapter xml:id="tdd-loop">
+<title>Test-first: codify behavior and edge cases</title>
+<simpara>TDD helps clarify intent and lock down edge cases. We keep tests small and fast; they run with Zig’s testing allocator, which catches leaks by default. This chapter includes tests because the content plan calls for TDD; elsewhere we’ll favor <literal>zig run</literal>-style demos for visible output. See <link xl:href="13__testing-and-leak-detection.xml">13__testing-and-leak-detection.xml</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/testing.zig">testing.zig</link>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 14__project-path-utility.adoc - include::example$chapters-data/code/14__project-path-utility-tdd/path_util_test.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test chapters-data/code/14__project-path-utility-tdd/path_util_test.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 3 tests passed.</programlisting>
+</para>
+</formalpara>
+</chapter>
+<chapter xml:id="leak-catch-fix">
+<title>Catch a deliberate leak → fix it</title>
+<simpara>The testing allocator flags leaks at the end of a test. First, a failing example that forgets to <literal>free</literal>:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 14__project-path-utility.adoc - include::example$chapters-data/code/14__project-path-utility-tdd/leak_demo_fail.zig[]</programlisting>
+<formalpara>
+<title>Run (expect failure)</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test chapters-data/code/14__project-path-utility-tdd/leak_demo_fail.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output (excerpt)</title>
+<para>
+<screen>[gpa] (err): memory address 0x… leaked:
+… path_util.zig:49:33: … in joinAlloc
+… leak_demo_fail.zig:6:42: … in test.deliberate leak caught by testing allocator
+
+All 1 tests passed.
+1 errors were logged.
+1 tests leaked memory.
+error: the following test command failed with exit code 1:
+…/test --seed=0x…</screen>
+</para>
+</formalpara>
+<simpara>Then fix it with <literal>defer</literal> and watch the suite go green:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 14__project-path-utility.adoc - include::example$chapters-data/code/14__project-path-utility-tdd/leak_demo_fix.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test chapters-data/code/14__project-path-utility-tdd/leak_demo_fix.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 1 tests passed.</programlisting>
+</para>
+</formalpara>
+<simpara><link xl:href="10__allocators-and-memory-management.xml">10__allocators-and-memory-management.xml</link>, <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/heap.zig">heap.zig</link></simpara>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>For production path handling, consult <literal>std.fs.path</literal> for platform nuances (UNC paths, drive letters, special roots).</simpara>
+</listitem>
+<listitem>
+<simpara>Prefer <literal>defer allocator.free(buf)</literal> immediately after successful allocations; it makes success and error paths correct by construction. <link xl:href="04__errors-resource-cleanup.xml">04__errors-resource-cleanup.xml</link></simpara>
+</listitem>
+<listitem>
+<simpara>When you need visible output (tutorials, demos), prefer <literal>zig run</literal> examples; when you need guarantees (CI), prefer <literal>zig test</literal>. This chapter demonstrates both because it’s explicitly TDD-focused. <link xl:href="13__testing-and-leak-detection.xml">13__testing-and-leak-detection.xml</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>joinAlloc</literal> to elide <literal>.</literal> segments and collapse <literal>..</literal> pairs in the middle (be careful near the root). Add tests for edge cases, then demo with <literal>zig run</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Add <literal>stem(path)</literal> that returns the basename without extension; verify behavior for <literal>.gitignore</literal>, multi-dot names, and trailing dots.</simpara>
+</listitem>
+<listitem>
+<simpara>Write a tiny CLI that takes <literal>--change-ext md file1 file2 …</literal> and prints the results, using the page allocator and a buffered writer. <link xl:href="28__filesystem-and-io.xml">28__filesystem-and-io.xml</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>On Windows, this teaching utility treats both <literal>'/'</literal> and <literal>'\\'</literal> as separators for input, but always prints the local separator. <literal>std.fs.path</literal> has richer semantics if you need exact Windows behavior.</simpara>
+</listitem>
+<listitem>
+<simpara>Allocation failure handling: the demo uses <literal>std.heap.page_allocator</literal> and would abort on OOM; the tests use <literal>std.testing.allocator</literal> to systematically catch leaks. <link xl:href="10__allocators-and-memory-management.xml">10__allocators-and-memory-management.xml</link></simpara>
+</listitem>
+<listitem>
+<simpara>If you embed these helpers into larger tools, thread the allocator through your APIs and keep ownership rules explicit; avoid global state. <link xl:href="36__style-and-best-practices.xml">36__style-and-best-practices.xml</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

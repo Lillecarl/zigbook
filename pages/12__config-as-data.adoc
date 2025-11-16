@@ -1,0 +1,395 @@
+////
+changes: ["Initial chapter draft for struct-based configuration"]
+examples_compile: yes
+keywords: ["configuration", "structs", "validation", "overrides"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "13__project-config-loader"
+open_questions: []
+previous_chapter: "11__project-dynamic-string-builder"
+status: draft
+xref_complete: true
+////
+
+= Config as Data: Struct-Based Config
+:chapter-number: 12
+:chapter-slug: config-as-data
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Configuration files eventually become ordinary data in memory. By giving that data a rich type—complete with defaults, enums, and optionals—you can reason about misconfigurations at compile time, validate invariants with determinism, and hand-tuned settings to downstream code without stringly-typed glue (see xref:11__project-dynamic-string-builder.adoc[11] and link:https://github.com/ziglang/zig/tree/master/lib/std/meta.zig[meta.zig]).
+
+This chapter establishes a playbook for struct-based configuration: start with default-heavy structs, overlay layered overrides such as environment or command-line flags, then enforce guardrails with explicit error sets so the eventual CLI in the next project can trust its inputs (see link:https://github.com/ziglang/zig/tree/master/lib/std/log.zig[log.zig]).
+
+[[learning-goals]]
+== Learning Goals
+
+* Model nested configuration structs with enums, optionals, and sensible defaults to capture application intent. 
+* Layer profile, environment, and runtime overrides using reflection helpers such as `std.meta.fields` while keeping merges type-safe.
+* Validate configs with dedicated error sets, structured reporting, and inexpensive diagnostics so downstream systems can fail fast. xref:04__errors-resource-cleanup.adoc[04]
+
+[[config-structs]]
+== Structs as Configuration Contracts
+
+Typed configuration mirrors the invariants you expect in production. Zig structs let you declare defaults inline, encode modes with enums, and group related knobs so callers cannot accidentally pass malformed tuples. Leaning on standard-library enums, log levels, and writers keeps the API ergonomic while honoring the I/O interface overhaul in link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2].
+
+[[config-structs-defaults]]
+=== Default-rich struct definitions
+
+The baseline configuration provides defaults for every field, including nested structs. Consumers can use designated initializers to selectively override values without losing the rest of the defaults.
+
+[source,zig]
+----
+include::{sourcedir}/12__config-as-data/default_config.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run default_config.zig
+----
+
+.Output
+[source,shell]
+----
+defaults ->
+  host = 127.0.0.1
+  port = 8080
+  log_level = info
+  instrumentation = false
+  theme = system
+  timeouts = .{ connect_ms = 200, read_ms = 1200 }
+
+overrides ->
+  host = 0.0.0.0
+  port = 9090
+  log_level = debug
+  instrumentation = true
+  theme = dark
+  timeouts = .{ connect_ms = 75, read_ms = 1500 }
+----
+
+[[config-structs-optionals]]
+=== Optionals versus sentinel defaults
+
+NOTE: Only fields that truly need tri-state semantics become optionals (`?[]const u8` for TLS file paths later in the chapter); everything else sticks to concrete defaults. Combining nested structs (here, `Timeouts`) with `[]const u8` strings supplies immutable references that remain valid for the lifetime of the configuration (see xref:03__data-fundamentals.adoc[03]).
+
+[[config-structs-initializers]]
+=== Designated overrides stay readable
+
+Since designated initializers allow you to override just the fields you care about, you can keep configuration declarations near call sites without sacrificing discoverability. Treat the struct literal as documentation: group related overrides together and lean on enums (like `Theme`) to keep magic strings out of your build. xref:02__control-flow-essentials.adoc[02], link:https://github.com/ziglang/zig/tree/master/lib/std/enums.zig[enums.zig]
+
+[[parsing-enum-values]]
+==== Parsing Enum Values from Strings
+
+When loading configuration from JSON, YAML, or environment variables, you'll often need to convert strings to enum values. Zig's `std.meta.stringToEnum` handles this with compile-time optimization based on enum size.
+
+[mermaid]
+....
+graph LR
+    STRINGTOENUM["stringToEnum(T, str)"]
+
+    subgraph "Small Enums"
+        SMALL["fields.len <= 100"]
+        MAP["StaticStringMap"]
+        STRINGTOENUM --> SMALL
+        SMALL --> MAP
+    end
+
+    subgraph "Large Enums"
+        LARGE["fields.len > 100"]
+        INLINE["inline for loop"]
+        STRINGTOENUM --> LARGE
+        LARGE --> INLINE
+    end
+
+    RESULT["?T"]
+    MAP --> RESULT
+    INLINE --> RESULT
+....
+
+For small enums (≤100 fields), `stringToEnum` builds a compile-time `StaticStringMap` for O(1) lookups. Larger enums use an inline loop to avoid compilation slowdowns from massive switch statements. The function returns `?T` (optional enum value), allowing you to handle invalid strings gracefully:
+
+[source,zig]
+----
+const theme_str = "dark";
+const theme = std.meta.stringToEnum(Theme, theme_str) orelse .system;
+----
+
+**This pattern is essential for config loaders:** parse the string, fall back to a sensible default if invalid. The optional return forces you to handle the error case explicitly, preventing silent failures from typos in config files (see link:https://github.com/ziglang/zig/blob/master/lib/std/meta.zig[meta.zig]).
+
+[[config-layering]]
+== Layering and Overrides
+
+Real deployments pull configuration from multiple sources. By representing each layer as a struct of optionals, you can merge them deterministically: reflection bridges make it easy to iterate across fields without hand-writing boilerplate for every knob. xref:05__project-tempconv-cli.adoc[05]
+
+[[config-layering-example]]
+=== Merging layered overrides
+
+This program applies profile, environment, and command-line overrides where they exist, falling back to defaults otherwise. The merge order becomes explicit in `apply`, and the resulting struct stays fully typed.
+
+[source,zig]
+----
+include::{sourcedir}/12__config-as-data/merge_overrides.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run chapters-data/code/12__config-as-data/merge_overrides.zig
+----
+
+.Output
+[source,shell]
+----
+defaults:
+  host = 127.0.0.1
+  port = 8080
+  log = info
+  instrumentation = false
+  theme = system
+  timeouts = .{ .connect_ms = 200, .read_ms = 1200 }
+profile:
+  host = 0.0.0.0
+  port = 9000
+  log = debug
+  instrumentation = true
+  theme = dark
+  timeouts = .{ .connect_ms = 100, .read_ms = 1500 }
+env:
+  host = config.internal
+  port = 9443
+  log = warn
+  instrumentation = false
+  theme = system
+  timeouts = .{ .connect_ms = 60, .read_ms = 1100 }
+command_line:
+  host = 127.0.0.1
+  port = 8080
+  log = info
+  instrumentation = false
+  theme = light
+  timeouts = .{ .connect_ms = 200, .read_ms = 1200 }
+
+resolved:
+  host = config.internal
+  port = 9443
+  log = warn
+  instrumentation = false
+  theme = light
+  timeouts = .{ .connect_ms = 60, .read_ms = 1100 }
+----
+
+See xref:10__allocators-and-memory-management.adoc[10] for allocator background relevant to layered configuration.
+
+[[field-introspection]]
+==== How Field Iteration Works Under the Hood
+
+The `apply` function uses `std.meta.fields` to iterate over struct fields at compile time. Zig's reflection API provides a rich set of introspection capabilities that make generic config merging possible without hand-written boilerplate for each field.
+
+[mermaid]
+....
+graph TB
+    subgraph "Container Introspection"
+        FIELDS["fields(T)"]
+        FIELDINFO["fieldInfo(T, field)"]
+        FIELDNAMES["fieldNames(T)"]
+        TAGS["tags(T)"]
+        FIELDENUM["FieldEnum(T)"]
+    end
+
+    subgraph "Declaration Introspection"
+        DECLARATIONS["declarations(T)"]
+        DECLINFO["declarationInfo(T, name)"]
+        DECLENUM["DeclEnum(T)"]
+    end
+
+    subgraph "Applicable Types"
+        STRUCT["struct"]
+        UNION["union"]
+        ENUMP["enum"]
+        ERRORSET["error_set"]
+    end
+
+    STRUCT --> FIELDS
+    UNION --> FIELDS
+    ENUMP --> FIELDS
+    ERRORSET --> FIELDS
+
+    STRUCT --> DECLARATIONS
+    UNION --> DECLARATIONS
+    ENUMP --> DECLARATIONS
+
+    FIELDS --> FIELDINFO
+    FIELDS --> FIELDNAMES
+    FIELDS --> FIELDENUM
+    ENUMP --> TAGS
+....
+
+The introspection API provides:
+
+* *`fields(T)`*: Returns compile-time field information for any struct, union, enum, or error set
+* *`fieldInfo(T, field)`*: Gets detailed information for a specific field (name, type, default value, alignment)
+* *`FieldEnum(T)`*: Creates an enum with variants for each field name, useful for switch statements over fields
+* *`declarations(T)`*: Returns compile-time declaration info for functions and constants in a type
+
+When you see `inline for (std.meta.fields(Config))` in the merge logic, Zig unrolls this loop at compile time, generating specialized code for each field. This eliminates runtime overhead while maintaining type safety—the compiler verifies that all field types match between layers (see link:https://github.com/ziglang/zig/blob/master/lib/std/meta.zig[meta.zig]).
+
+[[config-layering-precedence]]
+=== Making precedence explicit
+
+Because `apply` copies the merged struct on each iteration, the order of the slice literal reads top-to-bottom precedence: later entries win. If you need lazy evaluation or short-circuit merging, swap `apply` for a version that stops once a field is set—just remember to keep defaults immutable so earlier layers cannot accidentally mutate shared state. xref:07__project-safe-file-copier.adoc[07]
+
+[[deep-equality]]
+==== Deep Structural Equality with std.meta.eql
+
+For advanced config scenarios like detecting whether a reload is needed, `std.meta.eql(a, b)` performs deep structural comparison. This function handles nested structs, unions, error unions, and optionals recursively:
+
+[mermaid]
+....
+graph TB
+    subgraph "Type Comparison"
+        EQL["eql(a, b)"]
+
+        STRUCT_EQL["Struct comparison"]
+        UNION_EQL["Union comparison"]
+        ERRORUNION_EQL["Error union comparison"]
+        OPTIONAL_EQL["Optional comparison"]
+
+        EQL --> STRUCT_EQL
+        EQL --> UNION_EQL
+        EQL --> ERRORUNION_EQL
+        EQL --> OPTIONAL_EQL
+    end
+....
+
+The `eql(a, b)` function performs deep structural equality comparison, handling nested structs, unions, and error unions recursively. This is useful for detecting "no-op" config updates:
+
+[source,zig]
+----
+const old_config = loadedConfig;
+const new_config = parseConfigFile("app.conf");
+
+if (std.meta.eql(old_config, new_config)) {
+    // Skip reload, nothing changed
+    return;
+}
+// Apply new config
+----
+
+The comparison works field-by-field for structs (including nested `Timeouts`), compares tags and payloads for unions, and handles error unions and optionals correctly (see link:https://github.com/ziglang/zig/blob/master/lib/std/meta.zig[meta.zig]).
+
+[[config-validation]]
+== Validation and Guardrails
+
+Typed configs become trustworthy once you defend their invariants. Zig's error sets turn validation failures into actionable diagnostics, and helper functions keep reporting consistent whether you're logging or surfacing feedback to a CLI (see xref:04__errors-resource-cleanup.adoc[04] and link:https://github.com/ziglang/zig/tree/master/lib/std/debug.zig[debug.zig]).
+
+[[config-validation-example]]
+=== Encoding invariants with error sets
+
+This validator checks port ranges, TLS prerequisites, and timeout ordering. Each failure maps to a dedicated error tag so callers can react accordingly.
+
+[source,zig]
+----
+include::{sourcedir}/12__config-as-data/validate_config.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run chapters-data/code/12__config-as-data/validate_config.zig
+----
+
+.Output
+[source,shell]
+----
+production: ok
+insecure: error InsecureProduction
+misordered: error TimeoutOrdering
+missing_tls_material: error MissingTlsMaterial
+----
+
+xref:04__errors-resource-cleanup.adoc[]
+
+[[config-validation-reporting]]
+=== Reporting helpful diagnostics
+
+Use `@errorName` (or structured enums for richer data) when printing validation errors so operators see the exact invariant that failed. Pair that with a shared reporting helper—like `report` in the example—to unify formatting across tests, logging, and CLI feedback (see xref:03__data-fundamentals.adoc[03] and link:https://github.com/ziglang/zig/tree/master/lib/std/Io/Writer.zig[Writer.zig]).
+
+[[error-message-format]]
+==== Error Message Formatting Standards
+
+For production-grade diagnostics, follow the compiler's error message format to provide consistent, parsable output. The standard format matches what users expect from Zig tooling:
+
+|===
+| Component | Format | Description
+
+| Location
+| `:line:col:`
+| Line and column numbers (1-indexed)
+
+| Severity
+| `error:` or `note:`
+| Message severity level
+
+| Message
+| Text
+| The actual error or note message
+|===
+
+Example error messages:
+
+----
+config.toml:12:8: error: port must be between 1024 and 65535
+config.toml:15:1: error: TLS enabled but cert_file not specified
+config.toml:15:1: note: set cert_file and key_file when tls = true
+----
+
+The colon-separated format allows tools to parse error locations for IDE integration, and the severity levels (`error:` vs `note:`) help users distinguish between problems and helpful context. When validating configuration files, include the filename, line number (if available from your parser), and a clear description of the invariant violation. This consistency makes your config errors feel native to the Zig ecosystem.
+
+[[config-validation-comptime]]
+=== Compile-time helpers for schema drift
+
+For larger systems, consider wrapping your config struct in a comptime function that verifies field presence with `@hasField` or generates documentation from defaults. This keeps runtime code small while guaranteeing that evolving schemas stay in sync with generated config files (see xref:15__comptime-and-reflection.adoc[15]).
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Keep immutable `[]const u8` slices for string settings so they can safely alias compile-time literals without extra copies (see link:https://github.com/ziglang/zig/tree/master/lib/std/mem.zig[mem.zig]).
+* Remember to flush buffered writers after emitting configuration diagnostics, especially when mixing stdout with process pipelines.
+* When layering overrides, clone mutable sub-structs (like allocator-backed lists) before mutation to avoid cross-layer aliasing. xref:10__allocators-and-memory-management.adoc[10]
+
+[[exercises]]
+== Exercises
+
+* Extend `AppConfig` with an optional telemetry endpoint (`?[]const u8`) and update the validator to ensure it is set whenever instrumentation is enabled.
+* Implement a `fromArgs` helper that parses key-value command-line pairs into an overrides struct, reusing the layering function to apply them. xref:05__project-tempconv-cli.adoc[05]
+* Generate a Markdown table summarizing defaults by iterating over `std.meta.fields(AppConfig)` at comptime and writing rows to a buffered writer. xref:11__project-dynamic-string-builder.adoc[11]
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* For massive configs, stream JSON/YAML data into arena-backed structs instead of building everything on the stack to avoid exhausting temporary buffers (see xref:10__allocators-and-memory-management.adoc[10]).
+* If you need dynamic keys, pair struct-based configs with `std.StringHashMap` lookups so you can keep typed defaults while still honoring user-provided extras (see link:https://github.com/ziglang/zig/tree/master/lib/std/hash_map.zig[hash_map.zig]).
+* Consider `std.io.Reader` pipelines when validating files uploaded over the network; this lets you short-circuit before materializing the entire config (see xref:28__filesystem-and-io.adoc[28]).

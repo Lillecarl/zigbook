@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Appendix D. Mapping C/Rust Idioms → Zig Constructs</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>C and Rust establish the mental models that many Zig developers bring along: manual <literal>malloc</literal>/<literal>free</literal>, RAII destructors, <literal>Option&lt;T&gt;</literal>, <literal>Result&lt;T, E&gt;</literal>, and trait objects. This appendix translates those habits into idiomatic Zig so you can port real codebases without fighting the language.</simpara>
+<simpara>Zig&#8217;s tightened pointer alignment rules (<literal>@alignCast</literal>) and improved allocator diagnostics show up repeatedly when wrapping foreign APIs. <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Swap manual resource cleanup for <literal>defer</literal>/<literal>errdefer</literal> while preserving the control you expect from C.</simpara>
+</listitem>
+<listitem>
+<simpara>Express Rust-inspired <literal>Option</literal>/<literal>Result</literal> logic with Zig optionals and error unions in a composable way.</simpara>
+</listitem>
+<listitem>
+<simpara>Adapt callback- or trait-based polymorphism to Zig&#8217;s <literal>comptime</literal> generics and pointer shims.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="c-resource-lifetimes">
+<title>Translating C Resource Lifetimes</title>
+<simpara>C programmers habitually pair every <literal>malloc</literal> with a matching <literal>free</literal>. Zig lets you encode the same intent with <literal>errdefer</literal> and structured error sets so buffers never leak even when validation fails. <link xl:href="04__errors-resource-cleanup.xml">4</link> The following example contrasts a direct translation with a Zig-first helper that frees memory automatically, highlighting how allocator errors compose with domain errors. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/mem.zig">mem.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 58__mapping-c-rust-idioms.adoc - include::example$chapters-data/code/58__mapping-c-rust-idioms/01_c_style_cleanup.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 01_c_style_cleanup.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>The explicit <literal>NormalizeError</literal> union tracks both allocator failures and validation failures, a pattern encouraged throughout <link xl:href="10__allocators-and-memory-management.xml">Chapter 10&#8217;s allocator tour</link>.</simpara>
+</tip>
+</chapter>
+<chapter xml:id="rust-option-result">
+<title>Mirroring Rust&#8217;s Option and Result Types</title>
+<simpara>Rust&#8217;s <literal>Option&lt;T&gt;</literal> maps cleanly to Zig&#8217;s <literal>?T</literal>, while <literal>Result&lt;T, E&gt;</literal> becomes an error union (<literal>E!T</literal>) with rich tags instead of stringly typed messages. <link xl:href="04__errors-resource-cleanup.xml">4</link> This recipe pulls a configuration value from newline-separated text, first with an optional search and then with a domain-specific error union that converts parsing failures into caller-friendly diagnostics. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig">fmt.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 58__mapping-c-rust-idioms.adoc - include::example$chapters-data/code/58__mapping-c-rust-idioms/02_rust_option_result.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 02_rust_option_result.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Because Zig separates optional discovery from error propagation, you can reuse <literal>findPortLine</literal> for fast-path checks while <literal>parsePort</literal> handles the slower, fallible work—mirroring the Rust pattern of splitting <literal>Option::map</literal> from <literal>Result::map_err</literal>. <link xl:href="17__generic-apis-and-type-erasure.xml">17</link></simpara>
+</note>
+</chapter>
+<chapter xml:id="callback-bridges">
+<title>Bridging Traits and Function Pointers</title>
+<simpara>Both C and Rust lean on callbacks—either raw function pointers with context payloads or trait objects with explicit <literal>self</literal> parameters. Zig models the same abstraction with <literal>*anyopaque</literal> shims plus <literal>comptime</literal> adapters, so you keep type safety and zero-cost indirection. <link xl:href="33__c-interop-import-export-abi.xml">33</link> The example below shows a C-style callback and a trait-like <literal>handle</literal> method reused via the same legacy bridge, relying on Zig&#8217;s pointer casts and alignment assertions. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig">builtin.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 58__mapping-c-rust-idioms.adoc - include::example$chapters-data/code/58__mapping-c-rust-idioms/03_callback_bridge.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 03_callback_bridge.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>The additional <literal>@alignCast</literal> calls reflect a 0.15.2 footgun—pointer casts now assert alignment, so leave them in place when wrapping <literal>*anyopaque</literal> handles from C libraries. <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link></simpara>
+</tip>
+</chapter>
+<chapter xml:id="patterns">
+<title>Patterns to Keep on Hand</title>
+<itemizedlist>
+<listitem>
+<simpara>Keep allocator cleanup localized with <literal>errdefer</literal> while exposing typed results, so C ports stay leak-free without sprawling <literal>goto</literal> blocks. <link xl:href="04__errors-resource-cleanup.xml">4</link></simpara>
+</listitem>
+<listitem>
+<simpara>Convert foreign enums into Zig error unions early, then re-export a focused error set at your module boundary. <link xl:href="57__error-handling-patterns-cookbook.xml">57</link></simpara>
+</listitem>
+<listitem>
+<simpara>Implement trait-style behavior with <literal>comptime</literal> structs that expose a small interface (<literal>handle</literal>, <literal>format</literal>, etc.), letting the optimizer inline the call sites. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Manual allocation helpers should surface <literal>std.mem.Allocator.Error</literal> explicitly so callers can continue propagating failures transparently.</simpara>
+</listitem>
+<listitem>
+<simpara>When porting Rust crates that rely on drop semantics, audit every branch for <literal>return</literal> or <literal>break</literal> expressions—Zig will not automatically invoke destructors. <link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara>Function-pointer shims must respect calling conventions; if the C API expects <literal>extern fn</literal>, annotate your shim accordingly before shipping. <link xl:href="33__c-interop-import-export-abi.xml">33</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend the normalization helper to tolerate underscores by translating them to hyphens, and add tests covering both success and failure cases. <link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</listitem>
+<listitem>
+<simpara>Modify <literal>parsePort</literal> to return a struct containing both host and port, then document how the combined error union expands. <link xl:href="57__error-handling-patterns-cookbook.xml">57</link></simpara>
+</listitem>
+<listitem>
+<simpara>Generalize <literal>dispatchWithContext</literal> so it accepts a compile-time list of handlers, mirroring Rust&#8217;s trait object vtables. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Some C libraries expect you to allocate with their custom functions—wrap those allocators in a shim that implements the <literal>std.mem.Allocator</literal> interface, so the rest of your Zig code stays uniform. <link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</listitem>
+<listitem>
+<simpara>When porting Rust <literal>Option&lt;T&gt;</literal> that owns heap data, consider returning a slice plus length sentinel instead of duplicating ownership semantics. <link xl:href="03__data-fundamentals.xml">3</link></simpara>
+</listitem>
+<listitem>
+<simpara>If your callback bridge crosses threads, add synchronization primitives from Chapter 29 before mutating shared state. <link xl:href="29__threads-and-atomics.xml">29</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

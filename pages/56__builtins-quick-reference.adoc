@@ -1,0 +1,174 @@
+////
+changes: ["Initial builtins quick reference appendix"]
+examples_compile: yes
+keywords: ["appendix", "builtins", "reference"]
+last_updated: 2025-11-13
+last_verified: 2025-11-13
+next_chapter: "57__error-handling-patterns-cookbook"
+open_questions: []
+previous_chapter: "55__style-guide-highlights"
+status: draft
+xref_complete: true
+////
+
+= Appendix B. Builtins Quick Reference
+:chapter-number: 56
+:chapter-slug: builtins-quick-reference
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+`@builtins` are the compiler's verbs; they describe how Zig thinks about types, pointers, and program structure, and they are available in every file without imports. After experimenting with compile-time programming in Part III, this appendix captures the most common builtins, their intent, and the surface-level contracts you should remember when reading or writing metaprogramming-heavy Zig. xref:15__comptime-and-reflection.adoc[15]
+
+The 0.15.2 release stabilized several introspection helpers (`@typeInfo`, `@hasDecl`, `@field`) and clarified truncation semantics for new integer sizes, making it practical to rely on the behaviors summarized here. link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
+
+[[learning-goals]]
+== Learning Goals
+
+* Spot the difference between reflection builtins, arithmetic helpers, and control builtins when scanning a codebase.
+* Combine type inspection builtins to build adapters that work with user-provided types.
+* Verify the runtime behavior of numeric conversions at the edges of range and safety modes.
+
+[[core-reflection]]
+== Core Reflection Builtins
+
+Reflection builtins give us structured information about user types without grabbing raw pointers or discarding safety checks. xref:15__comptime-and-reflection.adoc[15] The example below shows how to form a documented summary of any struct, including comptime fields, optional payloads, and nested arrays.
+
+[source,zig]
+----
+include::{sourcedir}/56__builtins-quick-reference/01_struct_introspection.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 01_struct_introspection.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+TIP: Use `@typeInfo` plus `@field` inside inline loops so the compiler still optimizes away branches after specialization. xref:17__generic-apis-and-type-erasure.adoc[17]
+
+[[value-extraction]]
+== Value Extraction Helpers
+
+Builtins such as `@field`, `@hasField`, and `@fieldParentPtr` let you map runtime data back to compile-time declarations without violating Zig’s strict aliasing rules. The following snippet shows how to surface parent pointers while maintaining const-correctness. link:https://github.com/ziglang/zig/tree/master/lib/std/meta.zig[meta.zig]
+
+[source,zig]
+----
+include::{sourcedir}/56__builtins-quick-reference/02_parent_ptr_lookup.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 02_parent_ptr_lookup.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+NOTE: `@fieldParentPtr` assumes the child pointer is valid and properly aligned; combine it with `std.debug.assert` in debug builds to catch accidental misuse early. xref:37__illegal-behavior-and-safety-modes.adoc[37]
+
+[[numeric-safety]]
+== Numeric Safety Builtins
+
+Numeric conversions are where undefined behavior often hides; Zig makes truncation explicit via `@intCast`, `@intFromFloat`, and `@truncate`, which all obey safety-mode semantics. xref:37__illegal-behavior-and-safety-modes.adoc[37] 0.15.2 refined the diagnostics these builtins emit when overflow occurs, making them reliable guards in debug builds.
+
+[source,zig]
+----
+include::{sourcedir}/56__builtins-quick-reference/03_numeric_conversions.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 03_numeric_conversions.zig
+----
+
+.Output
+[source,shell]
+----
+All 3 tests passed.
+----
+
+TIP: Wrap lossy conversions in small helper functions so the intent stays readable and you can centralize assertions around shared digit logic. xref:10__allocators-and-memory-management.adoc[10]
+
+[[comptime-control]]
+== Comptime Control & Guards
+
+`@compileError`, `@panic`, `@setEvalBranchQuota`, and `@inComptime` give you direct control over compile-time execution; they are the safety valves that keep metaprogramming deterministic and transparent. xref:15__comptime-and-reflection.adoc[15] The short example below guards vector widths at compile time and raises the evaluation branch quota before computing a small Fibonacci number during analysis. 
+
+[source,zig]
+----
+include::{sourcedir}/56__builtins-quick-reference/04_comptime_guards.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 04_comptime_guards.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+CAUTION: `@compileError` stops the compilation unit immediately; use it sparingly and prefer returning an error when runtime validation is cheaper. Leave a commented-out call (as in the example) to document the failure mode without breaking the build. xref:12__config-as-data.adoc[12]
+
+[[patterns]]
+== Cross-Checking Patterns
+
+* Drive refactors with `@hasDecl` and `@hasField` before depending on optional features from user types; this matches the defensive style introduced in xref:17__generic-apis-and-type-erasure.adoc[Chapter 17].
+* Combine `@TypeOf`, `@typeInfo`, and `@fieldParentPtr` to keep diagnostics clear in validation code—the trio makes it easy to print structural information when invariants fail.
+* Remember that some builtins (like `@This`) depend on lexical scope; reorganizing your file can silently change their meaning, so rerun tests after every major rearrangement. xref:36__style-and-best-practices.adoc[36]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Builtins that interact with the allocator (`@alignCast`, `@ptrCast`) still obey Zig’s aliasing rules; rely on `std.mem` helpers when in doubt. xref:03__data-fundamentals.adoc[3]
+* `@setEvalBranchQuota` is global to the current compile-time execution context; keep quotas narrow to avoid masking infinite recursion. xref:15__comptime-and-reflection.adoc[15]
+* Some experimental builtins appear in nightly builds but not in 0.15.2—pin your tooling before adopting new names.
+
+[[exercises]]
+== Exercises
+
+* Build a diagnostic helper that prints the tag names of any union using `@typeInfo.union`. xref:17__generic-apis-and-type-erasure.adoc[17]
+* Extend the numeric conversions example to emit a human-readable diff between bit patterns before and after truncation. link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig]
+* Write a compile-time guard that rejects structs lacking a `name` field, then integrate it into a generic formatter pipeline. xref:36__style-and-best-practices.adoc[36]
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Prefer higher-level std helpers when a builtin duplicates existing behavior—the standard library often wraps edge cases for you. xref:43__stdlib-index.adoc[43]
+* Reflection against anonymous structs can produce compiler-generated names; cache them in your own metadata if user-facing logs need stability. xref:12__config-as-data.adoc[12]
+* When interfacing with C, remember that some builtins (e.g. `@ptrCast`) can affect calling conventions; double-check the ABI section before deploying. xref:33__c-interop-import-export-abi.adoc[33]

@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>Table Generator</subtitle>
+<date>2025-11-15</date>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>In this project, we turn the ideas from <link xl:href="15__comptime-and-reflection.xml">15</link> into a practical workflow: generate small lookup tables at compile time and use them at runtime with zero overhead. This technique removes branches from hot loops, replaces repeated work with constant data, and keeps code simple. We’ll take a “measure-first” mindset and show when a table helps and when it’s not worth the binary size.</simpara>
+<simpara>We’ll implement three self-contained demos:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>ASCII classification table: constant-time character categorization (digit/alpha/space/punct)</simpara>
+</listitem>
+<listitem>
+<simpara>Popcount table: fast bit counting for bytes, composable for larger aggregates</simpara>
+</listitem>
+<listitem>
+<simpara>Multiplication table: a parameterized N×N matrix rendered compactly</simpara>
+</listitem>
+</itemizedlist>
+<simpara>Each example uses Zig’s modern stdout writer (see the Writergate changes) and prints visible results when run directly. See <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/ascii.zig">ascii.zig</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Design compile-time table builders that are simple, readable, and fast. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+<listitem>
+<simpara>Weigh trade-offs: code size vs speed, flexibility vs “baked-in” constants. <link xl:href="39__performance-and-inlining.xml">41</link></simpara>
+</listitem>
+<listitem>
+<simpara>Format and present tables cleanly using <literal>std.Io.Writer</literal> with minimal allocation. <link xl:href="45__text-formatting-and-unicode.xml">47</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="ascii-class-table">
+<title>ASCII classification table</title>
+<simpara>We construct a 256-entry table mapping bytes to bitmasks for digit/alpha/space/punct. At runtime, we summarize an input string. The “punctuation” set is derived from <literal>isPrint &amp;&amp; !isAlphanumeric &amp;&amp; !isWhitespace</literal> (sufficient for ASCII).</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 16__project-table-generator.adoc - include::example$chapters-data/code/16__project-table-generator/ascii_class_table.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run ascii_class_table.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">input: Hello, Zig 0.15.2!
+
+digits=4 letters=8 spaces=6 punct=4</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Tables like this remove repeated branching in inner loops. Keep the derivation logic easy to audit, and prefer <literal>std.ascii</literal> helpers where possible. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</tip>
+</chapter>
+<chapter xml:id="popcount-table">
+<title>Popcount table for bytes</title>
+<simpara>Rather than call a bit-twiddling routine per byte, we bake a 256-entry popcount table and reduce across inputs. This scales from toy examples to “count set bits in a buffer” primitives.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 16__project-table-generator.adoc - include::example$chapters-data/code/16__project-table-generator/popcount_table.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run popcount_table.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">bytes: 0x00 0x0F 0xF0 0xAA 0xFF -&gt; total set bits = 20</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>In many workloads, the CPU’s POPCNT instruction (or <literal>std.math.popCount</literal>) is already fast. Prefer a table only when your profile shows that it helps for your data access pattern and platform. <link xl:href="50__random-and-math.xml">52</link></simpara>
+</note>
+</chapter>
+<chapter xml:id="times-table">
+<title>Parameterized multiplication table (N×N)</title>
+<simpara>Here the table dimension is a <literal>comptime</literal> parameter, so the compiler unrolls generation and stores a compact <literal>[N][N]u16</literal>. We format a 12×12 “times table” and only print a subset to keep output readable.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 16__project-table-generator.adoc - include::example$chapters-data/code/16__project-table-generator/mult_table.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run mult_table.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">12x12 multiplication table (partial):
+   1   2   3   4   5   6   7   8   9  10  11  12
+   2   4   6   8  10  12  14  16  18  20  22  24
+   3   6   9  12  15  18  21  24  27  30  33  36
+   4   8  12  16  20  24  28  32  36  40  44  48
+   5  10  15  20  25  30  35  40  45  50  55  60
+   6  12  18  24  30  36  42  48  54  60  66  72</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara><literal>inline while/for</literal> constructs need compile-time-known bounds; pairing them with <literal>comptime var</literal> indices makes intent explicit. Choose ordinary loops unless you have a reason to unroll. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</important>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Binary size vs speed: tables cost memory. Use them when they remove meaningful work from a hot path and your binary budget allows it. <link xl:href="39__performance-and-inlining.xml">41</link></simpara>
+</listitem>
+<listitem>
+<simpara>Portability: ASCII classification is straightforward; Unicode requires a different strategy (tables of ranges/pages or a library). <link xl:href="45__text-formatting-and-unicode.xml">47</link></simpara>
+</listitem>
+<listitem>
+<simpara>I/O: The examples use the Zig 0.15.2 <literal>std.Io.Writer</literal> interface with a buffer in the interface—don’t forget to call <literal>flush()</literal>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend the ASCII table with additional classes (hex digits, control) and print a histogram for arbitrary input files.</simpara>
+</listitem>
+<listitem>
+<simpara>Generate a <literal>crc32</literal> or <literal>crc16</literal> table at compile time and validate against a known test vector at runtime (as a small end-to-end demo). <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+<listitem>
+<simpara>Parameterize the multiplication table’s cell formatter to align at different widths; measure the impact on readability and code size. <link xl:href="45__text-formatting-and-unicode.xml">47</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Table invalidation: if inputs change shape (e.g., switching from ASCII to UTF-8 code points), document assumptions prominently and introduce compile-time assertions to catch misuse early. <link xl:href="36__style-and-best-practices.xml">37</link></simpara>
+</listitem>
+<listitem>
+<simpara>Micro-architectural effects: depending on cache behavior, a branchy routine can outperform a table walk; profile with realistic data. <link xl:href="40__profiling-optimization-hardening.xml">42</link></simpara>
+</listitem>
+<listitem>
+<simpara>For tables much larger than CPU caches, consider on-demand generation, chunking, or precomputed assets loaded from disk rather than embedding in the binary. <link xl:href="28__filesystem-and-io.xml">28</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

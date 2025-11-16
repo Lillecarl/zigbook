@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Data Fundamentals</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Control flow is only as useful as the data it pilots, so this chapter grounds Zig&#8217;s core collection types—arrays, slices, and sentinel-terminated strings—in practical usage while keeping value semantics explicit. See <link xl:href="https://ziglang.org/documentation/master/#Arrays">#Arrays</link> and <link xl:href="https://ziglang.org/documentation/master/#Slices">#Slices</link> for reference.</simpara>
+<simpara>We also make pointers, optionals, and alignment-friendly casts feel routine, showing how to safely reinterpret memory while retaining bounds checks and clarity about mutability. See <link xl:href="https://ziglang.org/documentation/master/#Pointers">#Pointers</link> and <link xl:href="https://ziglang.org/documentation/master/#alignCast">#alignCast</link> for details.</simpara>
+<section xml:id="type-system-context">
+<title>Zig&#8217;s Type System Categories</title>
+<simpara>Before diving into specific collection types, it&#8217;s helpful to understand where arrays, slices, and pointers fit within Zig&#8217;s type system. Every type in Zig belongs to a category, and each category provides specific operations:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Type Categories"
+        PRIMITIVE["Primitive Types&lt;br/&gt;bool, u8, i32, f64, void, ..."]
+        POINTER["Pointer Types&lt;br/&gt;*T, [*]T, []T, [:0]T"]
+        AGGREGATE["Aggregate Types&lt;br/&gt;struct, array, tuple"]
+        FUNCTION["Function Types&lt;br/&gt;fn(...) ReturnType"]
+        SPECIAL["Special Types&lt;br/&gt;anytype, type, comptime_int"]
+    end
+
+    subgraph "Common Type Operations"
+        ABISIZE["abiSize()&lt;br/&gt;Byte size in memory"]
+        ABIALIGN["abiAlignment()&lt;br/&gt;Required alignment"]
+        HASRUNTIME["hasRuntimeBits()&lt;br/&gt;Has runtime storage?"]
+        ELEMTYPE["elemType()&lt;br/&gt;Element type (arrays/slices)"]
+    end
+
+    PRIMITIVE --&gt; ABISIZE
+    POINTER --&gt; ABISIZE
+    AGGREGATE --&gt; ABISIZE
+
+    PRIMITIVE --&gt; ABIALIGN
+    POINTER --&gt; ABIALIGN
+    AGGREGATE --&gt; ABIALIGN
+
+    POINTER --&gt; ELEMTYPE
+    AGGREGATE --&gt; ELEMTYPE</literallayout>
+<simpara>Key insights for this chapter:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Arrays</emphasis> are aggregate types with compile-time-known length—their size is <literal>element_size * length</literal></simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Slices</emphasis> are pointer types that store both a pointer and runtime length—always 2 × pointer size</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Pointers</emphasis> come in multiple shapes (single-item <literal>*T</literal>, many-item <literal>[*]T</literal>, slice <literal>[]T</literal>) with different safety guarantees</simpara>
+</listitem>
+<listitem>
+<simpara>All types expose their size and alignment, which affect struct layout and memory allocation</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This type-aware design lets the compiler enforce bounds checking on slices while allowing pointer arithmetic on many-item pointers when you explicitly opt out of safety.</simpara>
+</section>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Distinguish array value semantics from slice views, including zero-length idioms for safe fallbacks.</simpara>
+</listitem>
+<listitem>
+<simpara>Navigate pointer shapes (<literal>*T</literal>, <literal>[*]T</literal>, <literal>?*T</literal>) and unwrap optionals without sacrificing safety instrumentation (see <link xl:href="https://ziglang.org/documentation/master/#Optionals">#Optionals</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Apply sentinel-terminated strings and alignment-aware casts (<literal>@alignCast</literal>, <literal>@bitCast</literal>, <literal>@intCast</literal>) when interoperating with other APIs (see <link xl:href="https://ziglang.org/documentation/master/#Sentinel-Terminated-Pointers">#Sentinel-Terminated-Pointers</link> and <link xl:href="https://ziglang.org/documentation/master/#Explicit-Casts">#Explicit-Casts</link>).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="section-1">
+<title>Structuring Collections in Memory</title>
+<simpara>Arrays own storage while slices borrow it, so the compiler enforces different guarantees around length, mutability, and lifetimes; mastering their interplay keeps iteration predictable and moves most bounds checks into debug builds.</simpara>
+<section xml:id="section-1-sub-a">
+<title>Arrays as Owned Storage</title>
+<simpara>Arrays carry length in their type, copy by value, and give you a mutable baseline from which to carve read-only and read-write slices.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 03__data-fundamentals.adoc - include::example$chapters-data/code/03__data-fundamentals/arrays_and_slices.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run arrays_and_slices.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">array len=4 allows mutation
+mutable_slice: len=4 head=-3
+prefix: len=2 head=-3
+values[0] after slice write = -3
+empty slice len=0 is zero-length
+copy[0]=-1 owned[0]=1
+zero slice len=0 from literal</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>The mutable slice and the original array share storage, while the <literal>[]const</literal> prefix resists writes—an intentional boundary that forces read-only consumers to stay honest.</simpara>
+</note>
+<section xml:id="_memory_layout_arrays_vs_slices">
+<title>Memory Layout: Arrays vs Slices</title>
+<simpara>Understanding how arrays and slices are laid out in memory clarifies why "arrays own storage while slices borrow it" and why array-to-slice coercion is a cheap operation:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Array in Memory"
+        ARRAY_DECL["const values: [4]i32 = .{1, 2, 3, 4}"]
+        ARRAY_MEM["Memory Layout (16 bytes)\n\nstack frame\n| 1 | 2 | 3 | 4 |"]
+
+        ARRAY_DECL --&gt; ARRAY_MEM
+    end
+
+    subgraph "Slice in Memory"
+        SLICE_DECL["const slice: []const i32 = &amp;values"]
+        SLICE_MEM["Memory Layout (16 bytes on 64-bit)\n\nstack frame\n|    ptr    |   len=4   |"]
+        POINTS["ptr points to array data"]
+
+        SLICE_DECL --&gt; SLICE_MEM
+        SLICE_MEM --&gt; POINTS
+    end
+
+    POINTS -.-&gt;|"references"| ARRAY_MEM
+
+    subgraph "Key Differences"
+        DIFF1["Array: Stores data inline&lt;br/&gt;Size = elem_size × length"]
+        DIFF2["Slice: Stores pointer + length&lt;br/&gt;Size = 2 × pointer_size (16 bytes on 64-bit)"]
+        DIFF3["Coercion: &amp;array → slice&lt;br/&gt;Just creates {ptr, len} pair"]
+    end</literallayout>
+<simpara><emphasis role="strong">Why this matters:</emphasis></simpara>
+<itemizedlist>
+<listitem>
+<simpara>Arrays have <emphasis role="strong">value semantics</emphasis>: assigning an array copies all elements</simpara>
+</listitem>
+<listitem>
+<simpara>Slices have <emphasis role="strong">reference semantics</emphasis>: assigning a slice copies just the pointer and length</simpara>
+</listitem>
+<listitem>
+<simpara>Array-to-slice coercion (<literal>&amp;array</literal>) is cheap—it doesn&#8217;t copy data, just creates a descriptor</simpara>
+</listitem>
+<listitem>
+<simpara>Slices are "fat pointers": they carry runtime length information, enabling bounds checking</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This is why functions typically accept slices as parameters—they can work with arrays, slices, and portions of either without copying the underlying data.</simpara>
+</section>
+</section>
+<section xml:id="section-1-sub-b">
+<title>Strings and Sentinels in Practice</title>
+<simpara>Sentinel-terminated arrays bridge to C APIs without forfeiting the safety of slices; you can reinterpret the byte stream with <literal>std.mem.span</literal> and still mutate the underlying buffer when the sentinel convention is preserved.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 03__data-fundamentals.adoc - include::example$chapters-data/code/03__data-fundamentals/sentinel_strings.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run sentinel_strings.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">literal len=17 contents="data fundamentals"
+trimmed slice len=4 -&gt; Labe
+full label after mutation: LabeX</programlisting>
+</para>
+</formalpara>
+<simpara>The sentinel slice keeps the trailing zero intact, so taking a <literal>[*:0]u8</literal> for FFI remains sound even after local mutations, while the plain slice gives ergonomic iteration within Zig (see <link xl:href="https://ziglang.org/documentation/master/#Type-Coercion">#Type-Coercion</link>).</simpara>
+<tip>
+<simpara><literal>std.mem.span</literal> converts sentinel pointers into ordinary slices without cloning data, making it ideal when you temporarily need bounds checks or slice helpers before returning to pointer APIs.</simpara>
+</tip>
+</section>
+<section xml:id="section-1-sub-c">
+<title>Immutable and Mutable Views</title>
+<simpara>Prefer <literal>[]const T</literal> when callers only inspect data—Zig will gladly coerce a mutable slice to a const view, giving you API clarity and keeping accidental writes from compiling in the first place.</simpara>
+</section>
+</chapter>
+<chapter xml:id="section-2">
+<title>Pointer Patterns and Cast Workflows</title>
+<simpara>Pointers surface when you share storage, interoperate with foreign layouts, or step outside slice bounds; by leaning on optional wrappers and explicit casts, you keep intent clear and allow safety checks to fire whenever assumptions break.</simpara>
+<section xml:id="pointer-shapes">
+<title>Pointer Shape Reference</title>
+<simpara>Zig offers multiple pointer types, each with different safety guarantees and use cases. Understanding when to use each shape is essential for writing safe, efficient code:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Pointer Shapes"
+        SINGLE["*T&lt;br/&gt;Single-Item Pointer"]
+        MANY["[*]T&lt;br/&gt;Many-Item Pointer"]
+        SLICE["[]T&lt;br/&gt;Slice"]
+        OPTIONAL["?*T&lt;br/&gt;Optional Pointer"]
+        SENTINEL_PTR["[*:0]T&lt;br/&gt;Sentinel Many-Item"]
+        SENTINEL_SLICE["[:0]T&lt;br/&gt;Sentinel Slice"]
+    end
+
+    subgraph "Characteristics"
+        SINGLE --&gt; S_BOUNDS["✓ Bounds: Single element&lt;br/&gt;✓ Safety: Dereference checked&lt;br/&gt;📍 Use: Function parameters, references"]
+
+        MANY --&gt; M_BOUNDS["⚠ Bounds: Unknown length&lt;br/&gt;✗ Safety: No bounds checking&lt;br/&gt;📍 Use: C interop, tight loops"]
+
+        SLICE --&gt; SL_BOUNDS["✓ Bounds: Runtime length&lt;br/&gt;✓ Safety: Bounds checked&lt;br/&gt;📍 Use: Most Zig code, iteration"]
+
+        OPTIONAL --&gt; O_BOUNDS["✓ Bounds: May be null&lt;br/&gt;✓ Safety: Must unwrap first&lt;br/&gt;📍 Use: Optional references"]
+
+        SENTINEL_PTR --&gt; SP_BOUNDS["✓ Bounds: Until sentinel&lt;br/&gt;~ Safety: Sentinel must exist&lt;br/&gt;📍 Use: C strings, null-terminated"]
+
+        SENTINEL_SLICE --&gt; SS_BOUNDS["✓ Bounds: Length + sentinel&lt;br/&gt;✓ Safety: Both length and sentinel&lt;br/&gt;📍 Use: Zig ↔ C string bridge"]
+    end</literallayout>
+<simpara><emphasis role="strong">Comparison Table:</emphasis></simpara>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="5">
+<colspec colname="col_1" colwidth="20*"/>
+<colspec colname="col_2" colwidth="20*"/>
+<colspec colname="col_3" colwidth="20*"/>
+<colspec colname="col_4" colwidth="20*"/>
+<colspec colname="col_5" colwidth="20*"/>
+<thead>
+<row>
+<entry align="left" valign="top">Shape</entry>
+<entry align="left" valign="top">Example</entry>
+<entry align="left" valign="top">Length Known?</entry>
+<entry align="left" valign="top">Bounds Checked?</entry>
+<entry align="left" valign="top">Common Use</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara><literal>*T</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>*i32</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Single element</simpara></entry>
+<entry align="left" valign="top"><simpara>Yes (implicit)</simpara></entry>
+<entry align="left" valign="top"><simpara>Reference to one item</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>[*]T</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>[*]i32</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Unknown</simpara></entry>
+<entry align="left" valign="top"><simpara><emphasis role="strong">No</emphasis></simpara></entry>
+<entry align="left" valign="top"><simpara>C arrays, pointer arithmetic</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>[]T</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>[]i32</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Runtime (in slice)</simpara></entry>
+<entry align="left" valign="top"><simpara><emphasis role="strong">Yes</emphasis></simpara></entry>
+<entry align="left" valign="top"><simpara>Primary Zig collection type</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>?*T</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>?*i32</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Single (if non-null)</simpara></entry>
+<entry align="left" valign="top"><simpara>Yes + null check</simpara></entry>
+<entry align="left" valign="top"><simpara>Optional references</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>[*:0]T</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>[*:0]u8</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Until sentinel</simpara></entry>
+<entry align="left" valign="top"><simpara>Sentinel must exist</simpara></entry>
+<entry align="left" valign="top"><simpara>C strings (<literal>char*</literal>)</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>[:0]T</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>[:0]u8</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Runtime + sentinel</simpara></entry>
+<entry align="left" valign="top"><simpara>Yes + sentinel guarantee</simpara></entry>
+<entry align="left" valign="top"><simpara>Zig strings for C APIs</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+<simpara><emphasis role="strong">Guidelines:</emphasis></simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Default to slices</emphasis> (<literal>[]T</literal>) for all Zig code—they provide safety and convenience</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Use single-item pointers</emphasis> (<literal>*T</literal>) when you need to mutate a single value or pass by reference</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Avoid many-item pointers</emphasis> (<literal>[*]T</literal>) unless interfacing with C or in performance-critical inner loops</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Use optional pointers</emphasis> (<literal>?*T</literal>) when null is a meaningful state, not for error handling</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Use sentinel types</emphasis> (<literal>[*:0]T</literal>, <literal>[:0]T</literal>) at the C boundary, convert to slices internally</simpara>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="workflow-1">
+<title>Optional Pointers for Shared Mutability</title>
+<simpara>Optional single-item pointers expose mutability without guessing at lifetimes—capture them only when present, mutate through the dereference, and fall back gracefully when the pointer is absent.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 03__data-fundamentals.adoc - include::example$chapters-data/code/03__data-fundamentals/pointers_and_optionals.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run pointers_and_optionals.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">alias -&gt; reading 42
+optional pointer empty
+optional pointer mutated to 52
+slice view len=4
+samples[2] via many pointer = 42</programlisting>
+</para>
+</formalpara>
+<simpara>The <literal>?*Sensor</literal> gate keeps mutation behind pattern matching, while the many-item pointer (<literal>[*]i32</literal>) documents aliasing risk by dropping bounds checks—a deliberate trade-off reserved for tight loops and FFI.</simpara>
+</section>
+<section xml:id="workflow-2">
+<title>Aligning and Reinterpreting Data</title>
+<simpara>When you must reinterpret raw bytes, use the casting builtins to promote alignment, change pointer element types, and keep integer/float conversions explicit so debug builds can catch undefined assumptions (see <link xl:href="https://ziglang.org/documentation/master/#bitCast">#bitCast</link>).</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 03__data-fundamentals.adoc - include::example$chapters-data/code/03__data-fundamentals/alignment_and_casts.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run alignment_and_casts.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">32-bit value = 0x11223344
+bitcast copy = 0x11223344
+truncate -&gt; 0x44, widen -&gt; 287454020
+floatCast ratio -&gt; 1.875</programlisting>
+</para>
+</formalpara>
+<simpara>By chaining <literal>@alignCast</literal>, <literal>@ptrCast</literal>, and <literal>@bitCast</literal> you assert layout relationships explicitly, and the subsequent <literal>@truncate</literal>/<literal>@intCast</literal> conversions keep integer widths honest when narrowing or widening across APIs.</simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Sentinel-terminated pointers are great for C bridges, but within Zig prefer slices so bounds checks stay available and APIs expose lengths.</simpara>
+</listitem>
+<listitem>
+<simpara>Upgrading pointer alignment with <literal>@alignCast</literal> still traps in Debug mode if the address is misaligned—prove the precondition before promoting.</simpara>
+</listitem>
+<listitem>
+<simpara>Many-item pointers (<literal>[*]T</literal>) drop bounds checks; reach for them sparingly and document invariants that a safe slice would have enforced.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>arrays_and_slices.zig</literal> to create a zero-length mutable slice from a runtime array, then append via <literal>std.ArrayList</literal> to observe how slice views remain valid.</simpara>
+</listitem>
+<listitem>
+<simpara>Modify <literal>sentinel_strings.zig</literal> to accept a user-supplied <literal>[:0]u8</literal> and guard against inputs missing the sentinel by returning an error union.</simpara>
+</listitem>
+<listitem>
+<simpara>Enhance <literal>alignment_and_casts.zig</literal> by adding a branch that rejects values whose low byte is zero before truncation, surfacing how <literal>@intCast</literal> depends on caller-supplied range guarantees.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

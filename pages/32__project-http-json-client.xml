@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>HTTP JSON Client</subtitle>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>This project chapter extends the networking primitives from <link xl:href="31__networking-http-and-json.xml">31</link> into a self-contained client that polls a service, parses JSON, and prints a health report. Whereas the prior chapter focused on raw socket handshakes and minimal HTTP examples, this one combines <literal>std.http.Client.fetch</literal>, <literal>std.json.parseFromSlice</literal>, and formatted terminal output to build a user-facing workflow (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/http/Client.zig">Client.zig</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json/static.zig">static.zig</link>).</simpara>
+<simpara>The example intentionally stands up a local server inside the same process so the client can run offline and under test. That fixture makes it easy to iterate on request framing and parsing logic while using the safer Reader and Writer APIs introduced in Zig 0.15.2 (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link>).</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Launch a lightweight HTTP fixture with <literal>std.net.Address.listen</literal> and coordinate readiness with <literal>std.Thread.ResetEvent</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Capture and decode a JSON payload into typed Zig structs and tagged unions by layering a wire representation over <literal>std.json.parseFromSlice</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Present the results in a table, using the modern Writer API to manage buffers explicitly and highlight impacted services.</simpara>
+</listitem>
+</itemizedlist>
+<simpara>Each goal builds directly on the client primitives introduced in the previous chapter and the HTTP components provided in Zig&#8217;s standard library (see <link xl:href="31__networking-http-and-json.xml">31</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/http/Server.zig">Server.zig</link>).</simpara>
+</chapter>
+<chapter xml:id="project-architecture">
+<title>Project architecture</title>
+<simpara>We structure the program into three pieces: a local HTTP server that exposes a status endpoint, a decoding layer that models the response as typed data, and a presentation layer that prints a concise summary. This mirrors the "fetch → parse → report" workflow mentioned in the content plan while keeping the entire project inside a single Zig executable. <link xl:href="00__content_plan.adoc">link</link></simpara>
+<section xml:id="local-fixture">
+<title>Local service fixture</title>
+<simpara>The fixture thread binds to <literal>127.0.0.1</literal>, accepts a single client, and answers <literal>GET /api/status</literal> with a canned JSON document. It reuses the <literal>std.http.Server</literal> adapter from the previous chapter, so all TCP details remain within the standard library, and the rest of the program can treat the service as though it were running elsewhere (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/net.zig">net.zig</link>).</simpara>
+</section>
+<section xml:id="typed-decoding">
+<title>Typed decoding strategy</title>
+<simpara>The JSON document uses optional fields to describe different incident types, so the program first parses it into a "wire" struct that mirrors those optional fields, then promotes the data into a Zig <literal>union(enum)</literal> based on the <literal>kind</literal> property. This pattern keeps <literal>std.json</literal> parsing straightforward while still yielding an ergonomic domain model for downstream logic (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/meta.zig">meta.zig</link>).</simpara>
+</section>
+</chapter>
+<chapter xml:id="fetch-decode-present">
+<title>Fetch, decode, and present</title>
+<simpara>The full program below wires the fixture, decoder, and renderer together. It can be run directly with <literal>zig run</literal>, and it prints a service table followed by any active incidents.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 32__project-http-json-client.adoc - include::example$chapters-data/code/32__project-http-json-client/main.zig[]</programlisting>
+<simpara>This program relies on the modern Reader/Writer APIs and the HTTP client components introduced in Zig 0.15.2 (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/Writer.zig">Writer.zig</link>).</simpara>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run main.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Fetching http://127.0.0.1:46211/api/status...
+Parsed 2 regions.
+
+SERVICE SUMMARY
+Region        Service        State       Latency (ms)
+-----------------------------------------------------
+us-east      auth          up              2.7
+us-east      billing       degraded      184.0
+us-east      search        up              5.1
+eu-central   auth          up              3.1
+eu-central   billing       outage          0.0
+
+ACTIVE INCIDENTS
+- us-east: maintenance window starts 2025-11-06T01:00Z, 45 min
+- eu-central: outage since 2025-11-05T08:12Z (severity: critical)</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Your port number will change each run because the server listens on <literal>0</literal> and lets the OS choose a free socket. The client constructs the URL dynamically from <literal>server.listen_address.in.getPort()</literal>.</simpara>
+</note>
+<section xml:id="walkthrough">
+<title>Walkthrough</title>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara><emphasis role="strong">Server bootstrap.</emphasis> <literal>serveStatus</literal> spins up <literal>std.http.Server</literal> on an accepted TCP stream, compares the request target, and responds with JSON or a 404. The summary payload lives in a multiline string, but you could just as easily emit it through <literal>std.json.Stringify</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Wire decoding and promotion.</emphasis> After fetching, the client parses it into <literal>SummaryWire</literal>, a structure of slices and optionals that reflect the JSON shape. <literal>buildSummary</literal> then allocates typed slices inside an arena and maps incident <literal>kind</literal> strings to union variants. Both the arena and fixed writer leverage the post-Writergate I/O APIs to control allocation explicitly.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Rendering.</emphasis> <literal>renderSummary</literal> prints the service table via <literal>Writer.print</literal> and iterates incidents, surfacing severity and scheduling details for each region.</simpara>
+</listitem>
+</orderedlist>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.http.Client.fetch</literal> buffers the entire response into the fixed writer; for larger payloads, swap in an arena-backed builder or stream tokens with <literal>std.json.Scanner</literal> (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json/Scanner.zig">Scanner.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>The decoding logic assumes incident objects include the fields required for their <literal>kind</literal>. Validation failures bubble out as <literal>error.MissingField</literal>; adjust the error handling to downgrade or log if you expect partially populated data.</simpara>
+</listitem>
+<listitem>
+<simpara>The arena allocator keeps all decoded slices alive for the lifetime of the report. If you need long-lived ownership, replace the arena with a longer-lived allocator and free slices manually when the report expires. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/heap/arena_allocator.zig">arena_allocator.zig</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Add a <literal>--region</literal> flag that filters the printed table to a specific region. Reuse the argument-parsing patterns from earlier CLI chapters before the networking section (see <link xl:href="05__project-tempconv-cli.xml">05</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Extend the JSON payload with historical latency percentiles and draw a textual sparkline or a min/median/max summary. Consult <literal>std.fmt</literal> for formatting helpers (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig">fmt.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Replace the canned data with a live endpoint of your choosing, but wrap it with a timeout and fall back to the fixture to keep tests deterministic.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>If the response grows beyond the <literal>response_buffer</literal> size, <literal>client.fetch</literal> reports <literal>error.WriteFailed</literal>. Handle that case by retrying with a heap-backed writer or by streaming the body to disk.</simpara>
+</listitem>
+<listitem>
+<simpara>For union promotion, consider storing the original <literal>SummaryWire</literal> alongside your typed data so you can expose raw JSON fields in diagnostics without re-parsing.</simpara>
+</listitem>
+<listitem>
+<simpara>In production code, you may want to reuse a single <literal>std.http.Client</literal> across multiple fetches; this example drops it after one request, but the API exposes a connection pool ready for reuse.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

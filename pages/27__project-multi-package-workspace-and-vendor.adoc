@@ -1,0 +1,268 @@
+////
+changes: ["Implemented multi-package workspace with vendored palette", "Documented deps.zig registration pattern"]
+examples_compile: yes
+keywords: ["workspace", "vendor", "deps.zig", "std.Build"]
+last_updated: 2025-11-05
+last_verified: 2025-11-05
+next_chapter: "28__filesystem-and-io"
+open_questions: []
+previous_chapter: "26__build-system-advanced-topics"
+status: draft
+xref_complete: true
+////
+
+= Project: Multi-Package Workspace & Vendor
+:chapter-number: 27
+:chapter-slug: project-multi-package-workspace-and-vendor
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+xref:26__build-system-advanced-topics.adoc[Chapter 26] explored advanced `std.Build` techniques for coordinating workspaces and matrix builds. This project chapter puts those tools to work: we will assemble a three-package workspace featuring two reusable libraries, a vendored ANSI palette, and an application that renders a latency dashboard. Along the way, we capture metadata with named write-files and install the artefact into `zig-out`, demonstrating how vendor-first workflows coexist with registry-ready modules (see link:https://github.com/ziglang/zig/tree/master/lib/std/Build.zig[Build.zig] and link:https://github.com/ziglang/zig/tree/master/lib/std/Build/Step/InstallDir.zig[Dir.zig]).
+
+The example is intentionally compact yet realistic—`libA` performs statistical analysis, `libB` formats status lines, and the vendored palette keeps terminal colouring private to the workspace. The build graph registers only the contracts we want consumers to see, mirroring the hygiene rules from the previous concept chapters. xref:25__module-resolution-and-discovery-deep.adoc[25]
+
+[[learning-goals]]
+== Learning Goals
+
+* Wire multiple libraries and a vendored helper into a single workspace using a shared `deps.zig` registration function (see xref:26__build-system-advanced-topics.adoc[26] and link:https://github.com/ziglang/zig/tree/master/lib/std/Build/Module.zig[Module.zig]).
+* Generate reproducible artefacts (a dependency map) with named write-files and install them into `zig-out` for CI inspection (see link:https://github.com/ziglang/zig/tree/master/lib/std/Build/Step/WriteFile.zig[File.zig]).
+* Validate component libraries through `zig build test`, ensuring vendored code participates in the same test harness as registry packages (see link:https://github.com/ziglang/zig/tree/master/lib/std/testing.zig[testing.zig]).
+* Apply Zig 0.15.2’s buffered writer API in an application that consumes the workspace modules (see link:https://ziglang.org/download/0.15.1/release-notes.html#upgrading-stdiogetstdoutwriterprint[#upgrading stdiogetstdoutwriterprint]).
+
+[[workspace-blueprint]]
+== Workspace blueprint
+
+The workspace lives under `chapters-data/code/27__project-multi-package-workspace-and-vendor/`. A minimal manifest declares the package name and the directories that should ship with any release, keeping vendored sources explicit (see link:https://github.com/ziglang/zig/blob/master/lib/init/build.zig.zon[build.zig.zon template]).
+
+[[manifest-layout]]
+=== Manifest and layout
+
+[source,zig]
+----
+include::{sourcedir}/27__project-multi-package-workspace-and-vendor/build.zig.zon[]
+----
+
+.Run
+[source,shell]
+----
+$ zig build --build-file build.zig map
+----
+
+.Output
+[source,shell]
+----
+no output
+----
+
+TIP: Running `map` installs `zig-out/workspace-artifacts/dependency-map.txt`, making the package surface auditable without combing through source trees.
+
+[[deps-pattern]]
+=== Wiring packages with `deps.zig`
+
+`deps.zig` centralises module registration so every consumer—tests, executables, or future examples—receives the same wiring. We register `libA` and `libB` under public names, while the ANSI palette stays anonymous via `b.createModule`.
+
+[source,zig]
+----
+include::{sourcedir}/27__project-multi-package-workspace-and-vendor/deps.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig build --build-file build.zig test
+----
+
+.Output
+[source,shell]
+----
+no output
+----
+
+IMPORTANT: Returning module handles keeps callers honest—only `build.zig` decides which names become public imports, an approach that aligns with the namespace rules from Chapter 25. xref:25__module-resolution-and-discovery-deep.adoc[25]
+
+[[build-orchestration]]
+=== Build graph orchestration
+
+The build script installs the executable, exposes `run`, `test`, and `map` steps, and copies the generated dependency map into `zig-out/workspace-artifacts/`.
+
+[source,zig]
+----
+include::{sourcedir}/27__project-multi-package-workspace-and-vendor/build.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig build --build-file build.zig run
+----
+
+.Output
+[source,shell]
+----
+dataset      status    mean       range      samples
+------------------------------------------------------
+frontend     stable    111.80     3.90       5         
+checkout     stable    100.60     6.40       5         
+analytics    alert     77.42      24.00      5         
+----
+
+NOTE: The dependency map written by the `map` step renders as:
+
+[listing]
+----
+Modules registered in build.zig:
+  libA      -> packages/libA/analytics.zig
+  libB      -> packages/libB/report.zig (imports libA, palette)
+  palette   -> vendor/palette/palette.zig (anonymous)
+  executable -> app/main.zig
+----
+
+[[library-modules]]
+== Library modules
+
+Two libraries share responsibility: `libA` performs numeric analysis, `libB` transforms those statistics into colour-coded rows. Tests live alongside each module so the build graph can execute them without additional glue.
+
+[[libA-analytics]]
+=== Analytics core (`libA`)
+
+`libA` implements Welford’s algorithm for stable variance computation and exposes convenience helpers such as `relativeSpread` and `zScore`. link:https://github.com/ziglang/zig/tree/master/lib/std/math.zig[math.zig]
+
+[source,zig]
+----
+include::{sourcedir}/27__project-multi-package-workspace-and-vendor/packages/libA/analytics.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test packages/libA/analytics.zig
+----
+
+.Output
+[source,shell]
+----
+All 1 tests passed.
+----
+
+[[libB-report]]
+=== Reporting surface (`libB`)
+
+`libB` depends on `libA` for statistics and the vendored palette for styling. It computes a status label per dataset and renders a compact table suitable for dashboards or CI logs.
+
+[source,zig]
+----
+include::{sourcedir}/27__project-multi-package-workspace-and-vendor/packages/libB/report.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig build --build-file build.zig test
+----
+
+.Output
+[source,shell]
+----
+no output
+----
+
+TIP: Testing through `zig build test` ensures the module sees `libA` and the palette via the same imports the executable uses, eliminating discrepancies between direct `zig test` runs and build-orchestrated runs.
+
+[[vendor-palette]]
+=== Vendored theme palette
+
+The ANSI palette stays private to the workspace—`deps.zig` injects it where needed without registering a public name. This keeps colour codes stable even if the workspace later consumes a registry dependency with conflicting helpers.
+
+[source,zig]
+----
+include::{sourcedir}/27__project-multi-package-workspace-and-vendor/vendor/palette/palette.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test vendor/palette/palette.zig
+----
+
+.Output
+[source,shell]
+----
+All 1 tests passed.
+----
+
+[[application-entry]]
+== Application entry point
+
+The executable imports only the public modules, builds datasets, and prints the table using the buffered writer API introduced in Zig 0.15.2.
+
+[source,zig]
+----
+include::{sourcedir}/27__project-multi-package-workspace-and-vendor/app/main.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig build --build-file build.zig run
+----
+
+.Output
+[source,shell]
+----
+dataset      status     mean       range      samples
+------------------------------------------------------
+frontend     stable     111.80     3.90       5         
+checkout     stable     100.60     6.40       5         
+analytics    alert      77.42      24.00      5         
+----
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* The workspace exposes only `libA` and `libB`; vendored modules remain anonymous thanks to `b.createModule`, preventing downstream consumers from relying on internal helpers.
+* Named write-files produce deterministic artefacts. Pair the `map` step with CI to detect accidental namespace changes before they reach production.
+* `zig build test` composes multiple module tests under a single command; if you add new packages, remember to thread their modules through `deps.zig` so they join the suite.
+
+[[exercises]]
+== Exercises
+
+* Extend the dependency map to emit JSON alongside the text file. Hint: add a second `mapping.add("dependency-map.json", ...)` and reuse `std.json` to serialise the structure. xref:26__build-system-advanced-topics.adoc[26], link:https://github.com/ziglang/zig/tree/master/lib/std/json.zig[json.zig]
+* Add a registry dependency via `b.dependency("logger", .{})`, re-export its module in `deps.zig`, and update the map to document the new namespace. xref:24__zig-package-manager-deep.adoc[24]
+* Introduce a `-Dalert-spread` option that overrides the default thresholds. Forward the option through `deps.zig` so both the executable and any tests see the same policy.
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, alternatives, edge cases
+
+* When the vendored palette eventually graduates to a standalone package, swap `b.createModule` for `b.addModule` and list it in `build.zig.zon` to ensure consumers fetch it via hashes.
+* If your workspace grows beyond a handful of modules, consider grouping registries in `deps.zig` by responsibility (`observability`, `storage`, etc.) so the build script stays navigable. xref:26__build-system-advanced-topics.adoc[26]
+* Cross-compiling the dashboard requires ensuring each target supports ANSI escapes; gate palette usage behind `builtin.os.tag` checks if you ship to Windows consoles without VT processing. link:https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig[builtin.zig]
+
+[[summary]]
+== Summary
+
+* `deps.zig` centralises module registration, enabling repeatable workspaces that expose only sanctioned namespaces.
+* Named write-files and install directories turn build metadata into versionable artefacts ready for CI checks.
+* A vendored helper can coexist with reusable libraries, keeping internal colour schemes private while the public API remains clean.
+
+With this project you now have a concrete template for organising multi-package Zig workspaces, balancing vendored code with reusable libraries while keeping the build graph transparent and testable.

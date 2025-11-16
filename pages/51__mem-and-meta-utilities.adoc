@@ -1,0 +1,156 @@
+////
+changes: ["Initial Mem and Meta Utilities chapter for Zig 0.15.2"]
+examples_compile: yes
+keywords: ["std.mem", "std.meta", "tokenize", "FieldEnum", "stringToEnum"]
+last_updated: 2025-11-06
+last_verified: 2025-11-06
+previous_chapter: "50__random-and-math"
+next_chapter: "52__debug-and-valgrind"
+status: draft
+xref_complete: true
+open_questions: []
+////
+
+= Mem and Meta Utilities
+:chapter-number: 51
+:chapter-slug: mem-and-meta-utilities
+:creative-commons:
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Having wrangled randomness and numeric helpers in the previous chapter, we now turn to the slice plumbing and reflection primitives that glue many Zig subsystems together.xref:50__random-and-math.adoc[50] Zig's `std.mem` establishes predictable rules for tokenizing, trimming, searching, and copying arbitrarily shaped data, while `std.meta` exposes enough type information to build lightweight generic helpers without giving up static guarantees.link:https://github.com/ziglang/zig/tree/master/lib/std/mem.zig[mem.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/meta.zig[meta.zig] Together they let you parse configuration files, introspect user-defined structs, and stitch together data pipelines with the same zero-cost abstractions used throughout the standard library.
+
+[[learning-goals]]
+== Learning Goals
+
+* Iterate across slices with `std.mem.tokenize*`, `std.mem.split*`, and search routines without allocating.
+* Normalize or rewrite slice contents in-place and aggregate results with `std.mem.join` and friends, even when working from stack buffers.link:https://github.com/ziglang/zig/tree/master/lib/std/heap.zig[heap.zig]
+* Reflect over struct fields using `std.meta.FieldEnum`, `std.meta.fields`, and `std.meta.stringToEnum` to build tiny schema-aware utilities.
+
+[[mem-slice-plumbing]]
+== Slice Plumbing with `std.mem`
+
+Tokenization, splitting, and rewriting all revolve around the same idea: work with borrowed slices instead of allocating new strings. Most `std.mem` helpers therefore accept a borrowed buffer and return slices into the original data, leaving you in control of lifetimes and copying.
+
+[[mem-tokenization-vs-splitting]]
+=== Tokenization Versus Splitting
+
+The next example processes a faux configuration blob. It tokenizes lines, trims whitespace, hunts for `key=value` pairs, and normalizes mode names in-place before joining the remaining path list via a fixed buffer allocator.
+
+[source,zig]
+----
+include::{sourcedir}/51__mem-and-meta-utilities/mem_token_workbench.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run mem_token_workbench.zig
+----
+
+.Output
+[source,shell]
+----
+normalized mode -> fast_render
+log level -> warn
+roots (2)
+  [0] /srv/www
+  [1] /srv/cache
+extra segments -> /opt/tools, /opt/tools/bin
+----
+
+TIP: Prefer `std.mem.tokenize*` variants when you want to skip delimiters entirely, and `std.mem.split*` when empty segments matter—for example, when you need to detect doubled separators.
+
+[[mem-copy-rewrite]]
+=== Copying, Rewriting, and Aggregating Slices
+
+`std.mem.copyForwards` guarantees safe overlap when copying forward, while `std.mem.replaceScalar` lets you normalize characters in-place without touching allocation. Once you have the slices you care about, use `std.mem.join` with a `std.heap.FixedBufferAllocator` to coalesce them into a single view without falling back to the general-purpose heap. Keep an eye on buffer lengths (as the example does for `mode_buffer`) so that the rewrite step stays bounds-safe.
+
+[[meta-reflection]]
+== Reflection Helpers with `std.meta`
+
+Where `std.mem` keeps data moving, `std.meta` helps describe it. The library exposes field metadata, alignment, and enumerated tags so that you can build schema-aware tooling without macro systems or runtime type information.
+
+[[meta-field-overrides]]
+=== Field-Driven Overrides with `FieldEnum`
+
+This sample defines a `Settings` struct, prints a schema summary, and applies overrides parsed from a string by dispatching through `std.meta.FieldEnum`. Each assignment uses statically typed code yet supports dynamic key lookup via `std.meta.stringToEnum` and the struct's own default values.
+
+[source,zig]
+----
+include::{sourcedir}/51__mem-and-meta-utilities/meta_struct_report.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run meta_struct_report.zig
+----
+
+.Output
+[source,shell]
+----
+settings schema:
+  - render: bool (align 1) default=false
+  - retries: u8 (align 1) default=1
+  - mode: []const u8 (align 1) default=slow
+  - log_level: []const u8 (align 1) default=info
+  - extra_paths: []const u8 (align 1) default=
+resolved values:
+  render => true
+  retries => 4
+  mode => fast-render
+  log_level => info
+  extra_paths => /srv/www:/srv/cache
+field tags visited: { .render, .retries, .mode, .log_level, .extra_paths }
+parsing failures: 0
+----
+
+NOTE: `std.meta.tags(FieldEnum(T))` materialises an array of field tags at comptime, making it cheap to track which fields a routine has touched without runtime reflection.
+
+[[meta-schema-patterns]]
+=== Schema Inspection Patterns
+
+By combining `std.meta.fields` with `@field`, you can emit a documentation table or prepare a lightweight LSP schema for editor integrations. `std.meta.alignment` reports the natural alignment of each field type, while the field iterator exposes default values so you can display sensible fallbacks alongside user-supplied overrides. Because everything happens at compile time, the generated code compiles down to a handful of constants and direct loads.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* When tokenizing, remember that the returned slices alias the original buffer; mutate or copy them before the source goes out of scope.
+* `std.mem.join` allocates through the supplied allocator—stack-buffer allocators work well for short joins, but switch to a general-purpose allocator as soon as you expect unbounded data.
+* `std.meta.stringToEnum` performs a linear scan for large enums; cache the result or build a lookup table when parsing untrusted input at scale.
+
+[[exercises]]
+== Exercises
+
+* Extend `mem_token_workbench.zig` to detect duplicate roots by sorting or deduplicating the slice list with `std.mem.sort` and `std.mem.indexOf` before joining.
+* Augment `meta_struct_report.zig` to emit JSON by pairing `std.meta.fields` with `std.json.StringifyStream`, keeping the compile-time schema but offering machine-readable output.xref:32__project-http-json-client.adoc[32]
+* Add a `strict` flag to the override parser that requires every key in `FieldEnum(Settings)` to appear at least once, using `std.meta.tags` to track coverage.xref:36__style-and-best-practices.adoc[36]
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, Alternatives, Edge Cases
+
+* If you need delimiter-aware iteration that preserves separators, fall back to `std.mem.SplitIterator`—tokenizers always drop delimiter slices.
+* For very large configuration blobs, consider `std.mem.terminated` and sentinel slices so you can stream sections without copying entire files into memory.xref:28__filesystem-and-io.adoc[28]
+* `std.meta` intentionally exposes only compile-time data; if you need runtime reflection, you must generate it yourself (for example, via build steps that emit lookup tables).

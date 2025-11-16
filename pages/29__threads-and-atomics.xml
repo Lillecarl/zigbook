@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Threads &amp; Atomics</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Filesystem plumbing from the previous chapter set the stage for applications that produce and consume data in parallel. Now we focus on how Zig launches OS threads, coordinates work across cores, and keeps shared state consistent with atomic operations (see <link xl:href="28__filesystem-and-io.xml">28</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Thread.zig">Thread.zig</link>).</simpara>
+<simpara>Zig 0.15.2’s thread primitives combine lightweight spawn APIs with explicit memory ordering, so you decide when a store becomes visible and when contention should block. Understanding these tools now will make the upcoming parallel wordcount project far less mysterious (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/atomic.zig">atomic.zig</link> and <link xl:href="30__project-parallel-wordcount.xml">30</link>).</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Spawn and join worker threads responsibly, selecting stack sizes and allocators only when necessary.</simpara>
+</listitem>
+<listitem>
+<simpara>Choose memory orderings for atomic loads, stores, and compare-and-swap loops when protecting shared state.</simpara>
+</listitem>
+<listitem>
+<simpara>Detect single-threaded builds at compile time and fall back to synchronous execution paths.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="thread-model">
+<title>Orchestrating Work with <literal>std.Thread</literal></title>
+<simpara>Zig models kernel threads through <literal>std.Thread</literal>, exposing helpers to query CPU counts, configure stack sizes, and join handles deterministically. Unlike async I/O, these are real kernel threads—every spawn consumes OS resources, so batching units of work matters.</simpara>
+<section xml:id="_thread_pool_pattern">
+<title>Thread Pool Pattern</title>
+<simpara>Before diving into manual thread spawning, it&#8217;s valuable to understand the thread pool pattern that Zig&#8217;s own compiler uses for parallel work. The following diagram shows how <literal>std.Thread.Pool</literal> distributes work across workers:</simpara>
+<literallayout class="monospaced">graph TB
+    ThreadPool["ThreadPool&lt;br/&gt;(std.Thread.Pool)"]
+
+    AstGen1["AstGen&lt;br/&gt;(File 1)"]
+    AstGen2["AstGen&lt;br/&gt;(File 2)"]
+    AstGen3["AstGen&lt;br/&gt;(File 3)"]
+
+    Sema1["Sema&lt;br/&gt;(Function 1)"]
+    Sema2["Sema&lt;br/&gt;(Function 2)"]
+
+    Codegen1["CodeGen&lt;br/&gt;(Function 1)"]
+    Codegen2["CodeGen&lt;br/&gt;(Function 2)"]
+
+    ThreadPool --&gt; AstGen1
+    ThreadPool --&gt; AstGen2
+    ThreadPool --&gt; AstGen3
+    ThreadPool --&gt; Sema1
+    ThreadPool --&gt; Sema2
+    ThreadPool --&gt; Codegen1
+    ThreadPool --&gt; Codegen2
+
+    ZcuPerThread["Zcu.PerThread&lt;br/&gt;(per-thread state)"]
+
+    Sema1 -.-&gt;|"uses"| ZcuPerThread
+    Sema2 -.-&gt;|"uses"| ZcuPerThread</literallayout>
+<simpara>A thread pool maintains a fixed number of worker threads that pull work items from a queue, avoiding the overhead of repeatedly spawning and joining threads. The Zig compiler uses this pattern extensively: <literal>std.Thread.Pool</literal> dispatches AST generation, semantic analysis, and code generation tasks to workers. Each worker has per-thread state (<literal>Zcu.PerThread</literal>) to minimize synchronization—only the final results need mutex protection when merging into shared data structures like <literal>InternPool.shards</literal>. This architecture demonstrates key concurrent design principles: work units should be independent, shared state should be sharded or protected by mutexes, and per-thread caches reduce contention. When your workload involves many small tasks, prefer <literal>std.Thread.Pool</literal> over manual spawning; when you need a few long-running workers with specific responsibilities, manual <literal>spawn</literal>/<literal>join</literal> is appropriate.</simpara>
+</section>
+<section xml:id="thread-model-chunk">
+<title>Chunking data with spawn/join</title>
+<simpara>The example below partitions an array of integers across a dynamic number of workers, using an atomic fetch-add to accumulate the total of even numbers without locks. It adapts to the host CPU count but never spawns more threads than there are elements to process.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 29__threads-and-atomics.adoc - include::example$chapters-data/code/29__threads-and-atomics/01_parallel_even_sum.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 01_parallel_even_sum.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">spawned 8 worker(s)
+even sum (threads): 7264
+even sum (sequential check): 7264</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>std.atomic.Value</literal> wraps plain integers and routes every access through <literal>@atomicLoad</literal>, <literal>@atomicStore</literal>, or <literal>@atomicRmw</literal>, shielding you from accidentally mixing atomic and non-atomic access to the same memory location.</simpara>
+</tip>
+</section>
+<section xml:id="thread-model-config">
+<title>Spawn configuration and scheduling hints</title>
+<simpara><literal>std.Thread.SpawnConfig</literal> lets you override stack sizes or supply a custom allocator if the defaults are unsuitable (for example, deep recursion or pre-allocated arenas). Catch <literal>Thread.getCpuCount()</literal> errors to provide a safe fallback, and remember to use <literal>Thread.yield()</literal> or <literal>Thread.sleep()</literal> when you need cooperative scheduling while waiting on other threads to progress.</simpara>
+</section>
+</chapter>
+<chapter xml:id="atomics">
+<title>Atomic state machines</title>
+<simpara>Zig exposes LLVM’s atomic intrinsics directly: you pick an order such as <literal>.acquire</literal>, <literal>.release</literal>, or <literal>.seq_cst</literal>, and the compiler emits the matching fences. That clarity is valuable when you design small state machines—like a one-time initializer—that multiple threads must observe consistently.</simpara>
+<section xml:id="atomics-once">
+<title>Implementing a once guard with atomic builtins</title>
+<simpara>This program builds a lock-free "call once" helper around <literal>@cmpxchgStrong</literal>. Threads spin only while another thread is running the initializer, then read the published value via an acquire load.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 29__threads-and-atomics.adoc - include::example$chapters-data/code/29__threads-and-atomics/02_atomic_once.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 02_atomic_once.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">thread 0 observed 9157
+thread 1 observed 9157
+thread 2 observed 9157
+thread 3 observed 9157
+init calls: 1
+config value: 9157</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara><literal>@cmpxchgStrong</literal> returns <literal>null</literal> on success, so looping while it yields a value is a concise way to retry the CAS without allocating a mutex. Pair the final <literal>@atomicStore</literal> with <literal>.release</literal> to publish the results before any waiter performs its <literal>.acquire</literal> load.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="single-threaded">
+<title>Single-threaded builds &amp; fallbacks</title>
+<simpara>Passing <literal>-Dsingle-threaded=true</literal> forces the compiler to reject any attempt to spawn OS threads. Code that might run in both configurations should branch on <literal>builtin.single_threaded</literal> at compile time and substitute an inline execution path. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig">builtin.zig</link>.</simpara>
+<section xml:id="_understanding_the_single_threaded_flag">
+<title>Understanding the Single-Threaded Flag</title>
+<simpara>The <literal>single_threaded</literal> flag is part of the compiler&#8217;s feature configuration system, affecting code generation and optimization:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Code Generation Features"
+        Features["Feature Flags"]
+
+        Features --&gt; UnwindTables["unwind_tables: bool"]
+        Features --&gt; StackProtector["stack_protector: bool"]
+        Features --&gt; StackCheck["stack_check: bool"]
+        Features --&gt; RedZone["red_zone: ?bool"]
+        Features --&gt; OmitFramePointer["omit_frame_pointer: bool"]
+        Features --&gt; Valgrind["valgrind: bool"]
+        Features --&gt; SingleThreaded["single_threaded: bool"]
+
+        UnwindTables --&gt; EHFrame["Generate .eh_frame&lt;br/&gt;for exception handling"]
+
+        StackProtector --&gt; CanaryCheck["Stack canary checks&lt;br/&gt;buffer overflow detection"]
+
+        StackCheck --&gt; ProbeStack["Stack probing&lt;br/&gt;prevents overflow"]
+
+        RedZone --&gt; RedZoneSpace["Red zone optimization&lt;br/&gt;(x86_64, AArch64)"]
+
+        OmitFramePointer --&gt; NoFP["Omit frame pointer&lt;br/&gt;for performance"]
+
+        Valgrind --&gt; ValgrindSupport["Valgrind client requests&lt;br/&gt;for memory debugging"]
+
+        SingleThreaded --&gt; NoThreading["Assume single-threaded&lt;br/&gt;enable optimizations"]
+    end</literallayout>
+<simpara>When <literal>single_threaded</literal> is true, the compiler assumes no concurrent access to memory, enabling several optimizations: atomic operations can be lowered to plain loads and stores (eliminating fence instructions), thread-local storage becomes regular globals, and synchronization primitives can be elided entirely. This flag is set via <literal>-Dsingle-threaded=true</literal> at build time and flows through <literal>Compilation.Config</literal> into code generation. Importantly, this is not just an API restriction—it fundamentally changes the generated code. Atomics compiled in single-threaded mode have weaker guarantees than atomics in multi-threaded builds, so you must ensure your code paths remain consistent across both modes to avoid subtle bugs when toggling the flag.</simpara>
+</section>
+<section xml:id="single-threaded-guard">
+<title>Gating thread usage at compile time</title>
+<simpara>The guard below resets an atomic state machine, then either spawns a worker or executes the task inline based on the build mode. Because the branch is compile-time, the single-threaded configuration never instantiates <literal>Thread.spawn</literal>, avoiding a compile error altogether.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 29__threads-and-atomics.adoc - include::example$chapters-data/code/29__threads-and-atomics/03_single_thread_guard.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 03_single_thread_guard.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">multi-threaded build; spawning worker
+task state: threaded_done</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara>When you build with <literal>-Dsingle-threaded=true</literal>, the inline branch is the only one compiled, so keep the logic symmetrical and make sure any shared state is still set via the same atomic helpers to avoid diverging semantics.</simpara>
+</important>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Threads must be joined or detached exactly once; leaking handles leads to resource exhaustion. <literal>Thread.join</literal> consumes the handle, so store it in a slice you can iterate later.</simpara>
+</listitem>
+<listitem>
+<simpara>Atomics operate on raw memory—never mix atomic and non-atomic accesses to the same location, even if you 'know' the race cannot happen. Wrap shared scalars in <literal>std.atomic.Value</literal> to keep your intent obvious.</simpara>
+</listitem>
+<listitem>
+<simpara>Compare-and-swap loops may live-spin; consider <literal>Thread.yield()</literal> or event primitives like <literal>Thread.ResetEvent</literal> when a wait might last longer than a few cycles.</simpara>
+</listitem>
+</itemizedlist>
+<section xml:id="_debugging_concurrent_code_with_threadsanitizer">
+<title>Debugging Concurrent Code with ThreadSanitizer</title>
+<simpara>Zig provides built-in race detection through ThreadSanitizer, a powerful tool for finding data races, deadlocks, and other concurrency bugs:</simpara>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="4">
+<colspec colname="col_1" colwidth="25*"/>
+<colspec colname="col_2" colwidth="25*"/>
+<colspec colname="col_3" colwidth="25*"/>
+<colspec colname="col_4" colwidth="25*"/>
+<thead>
+<row>
+<entry align="left" valign="top">Sanitizer</entry>
+<entry align="left" valign="top">Config Field</entry>
+<entry align="left" valign="top">Purpose</entry>
+<entry align="left" valign="top">Requirements</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara>Thread Sanitizer</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>any_sanitize_thread</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Data race detection</simpara></entry>
+<entry align="left" valign="top"><simpara>LLVM backend</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>UBSan</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>any_sanitize_c</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>C undefined behavior</simpara></entry>
+<entry align="left" valign="top"><simpara>LLVM backend, C code</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>Fuzzing</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>any_fuzz</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Fuzzing instrumentation</simpara></entry>
+<entry align="left" valign="top"><simpara>libfuzzer integration</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+<literallayout class="monospaced">graph TB
+    subgraph "Sanitizer Configuration"
+        Sanitizers["Sanitizer Flags"]
+
+        Sanitizers --&gt; TSan["any_sanitize_thread"]
+        Sanitizers --&gt; UBSan["any_sanitize_c"]
+        Sanitizers --&gt; Fuzz["any_fuzz"]
+
+        TSan --&gt; TSanLib["tsan_lib: ?CrtFile"]
+        TSan --&gt; TSanRuntime["ThreadSanitizer runtime&lt;br/&gt;linked into binary"]
+
+        UBSan --&gt; UBSanLib["ubsan_rt_lib: ?CrtFile&lt;br/&gt;ubsan_rt_obj: ?CrtFile"]
+        UBSan --&gt; UBSanRuntime["UBSan runtime&lt;br/&gt;C undefined behavior checks"]
+
+        Fuzz --&gt; FuzzLib["fuzzer_lib: ?CrtFile"]
+        Fuzz --&gt; FuzzRuntime["libFuzzer integration&lt;br/&gt;for fuzz testing"]
+    end</literallayout>
+<simpara>Enable ThreadSanitizer with <literal>-Dsanitize-thread</literal> when building your program. TSan instruments all memory accesses and synchronization operations, tracking happens-before relationships to detect races. When a race is detected, TSan prints detailed reports showing the conflicting accesses and their stack traces. The instrumentation adds significant runtime overhead (2-5x slowdown, 5-10x memory usage), so use it during development and testing, not in production. TSan is particularly valuable for validating atomic code: even if your logic appears correct, TSan can catch subtle ordering issues or missing synchronization. For the examples in this chapter, try running them with <literal>-Dsanitize-thread</literal> to verify they&#8217;re race-free—the parallel sum and atomic once patterns should pass cleanly, demonstrating proper synchronization.</simpara>
+</section>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend the parallel sum to accept a predicate callback so you can swap "even numbers" for any classification you like; measure the effect of <literal>.acquire</literal> vs <literal>.monotonic</literal> loads on contention.</simpara>
+</listitem>
+<listitem>
+<simpara>Rework the <literal>callOnce</literal> demo to stage errors: have the initializer return <literal>!void</literal> and store the failure in an atomic slot so callers can rethrow the same error consistently.</simpara>
+</listitem>
+<listitem>
+<simpara>Introduce a <literal>std.Thread.WaitGroup</literal> around the once-guard code so you can wait for arbitrary numbers of worker threads without storing handles manually.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>On platforms without pthreads or Win32 threads Zig emits a compile error; plan to fall back to event loops or async when targeting WASI without <literal>--threading</literal> support.</simpara>
+</listitem>
+<listitem>
+<simpara>Atomics operate on plain integers and enums; for composite state consider using a mutex or designing an array of atomics to avoid torn updates.</simpara>
+</listitem>
+<listitem>
+<simpara>Single-threaded builds can still use atomics, but the instructions compile to ordinary loads/stores. Keep the code paths consistent so you do not rely accidentally on the stronger ordering in multi-threaded builds.</simpara>
+</listitem>
+</itemizedlist>
+<section xml:id="_platform_specific_threading_constraints">
+<title>Platform-Specific Threading Constraints</title>
+<simpara>Not all platforms support threading, and some have special requirements for thread-local storage:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Threading Configuration"
+        TARG["Target Platform"]
+        TARG --&gt; SINGLETHREAD["defaultSingleThreaded()&lt;br/&gt;WASM, Haiku"]
+        TARG --&gt; EMULATETLS["useEmulatedTls()&lt;br/&gt;OpenBSD, old Android"]
+
+        SINGLETHREAD --&gt; NOTHREAD["No thread support"]
+        EMULATETLS --&gt; TLSEMU["Software TLS"]
+    end</literallayout>
+<simpara>Certain targets default to single-threaded mode because they lack OS thread support: WebAssembly (without the <literal>--threading</literal> flag) and Haiku OS both fall into this category. On these platforms, attempting to spawn threads results in a compile error unless you&#8217;ve explicitly enabled threading support in your build configuration. A related concern is thread-local storage (TLS): OpenBSD and older Android versions don&#8217;t provide native TLS, so Zig uses emulated TLS—a software implementation that&#8217;s slower but portable. When writing cross-platform concurrent code, check <literal>target.defaultSingleThreaded()</literal> and <literal>target.useEmulatedTls()</literal> to understand platform constraints. For WASM, you can enable threading with the <literal>atomics</literal> and <literal>bulk-memory</literal> features plus the <literal>--import-memory --shared-memory</literal> linker flags, but not all WASM runtimes support this. Design your code to gracefully degrade: use <literal>builtin.single_threaded</literal> to provide synchronous fallbacks, and avoid assuming TLS is zero-cost on all platforms.</simpara>
+</section>
+</chapter>
+<chapter xml:id="summary">
+<title>Summary</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.Thread</literal> offers lightweight spawn/join semantics, but you remain responsible for scheduling and cleanup.</simpara>
+</listitem>
+<listitem>
+<simpara>Atomic intrinsics such as <literal>@atomicLoad</literal>, <literal>@atomicStore</literal>, and <literal>@cmpxchgStrong</literal> make small lock-free state machines practical when you match the orderings to your invariant.</simpara>
+</listitem>
+<listitem>
+<simpara>Using <literal>builtin.single_threaded</literal> keeps shared components working across single-threaded builds and multi-core deployments without forking the codebase.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

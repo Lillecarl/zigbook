@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Illegal Behavior &amp; Safety Modes</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Finishing our style tune-up made it clear that invariants are worthless unless they fail loudly (<link xl:href="36__style-and-best-practices.xml">36</link>). This chapter explains how Zig formalizes those failures as illegal behavior and how the toolchain catches most of them before they corrupt state. <link xl:href="https://ziglang.org/documentation/master/#illegal-behavior">#illegal behavior</link></simpara>
+<simpara>Next we will dive into command-line tooling, so we want our runtime guardrails in place before scripting toggles optimization modes on our behalf. <link xl:href="38__zig-cli-deep-dive.xml">38</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Distinguish between safety-checked and unchecked categories of illegal behavior.</simpara>
+</listitem>
+<listitem>
+<simpara>Inspect the active optimization mode and reason about which runtime checks Zig will emit.</simpara>
+</listitem>
+<listitem>
+<simpara>Build contracts around <literal>@setRuntimeSafety</literal>, <literal>unreachable</literal>, and <literal>std.debug.assert</literal> to keep invariants provable in every build.</simpara>
+</listitem>
+</itemizedlist>
+<simpara><emphasis>Refs: <link xl:href="04__errors-resource-cleanup.xml">4</link></emphasis></simpara>
+</chapter>
+<chapter xml:id="illegal-behavior-basics">
+<title>Illegal Behavior in Zig</title>
+<simpara>Illegal behavior is Zig&#8217;s umbrella term for operations the language refuses to define, ranging from integer overflow to dereferencing an invalid pointer. We have already relied on bounds checks for slices and optionals; this section consolidates those rules so the upcoming CLI work inherits a predictable failure story. <link xl:href="03__data-fundamentals.xml">3</link></simpara>
+<section xml:id="illegal-behavior-checked-unchecked">
+<title>Safety-Checked vs Unchecked Paths</title>
+<simpara>Safety-checked illegal behavior covers the cases the compiler can instrument at runtime (overflow, sentinel mismatches, wrong-union-field access), while unchecked cases remain invisible to safety instrumentation (aliasing through the wrong pointer type, layout violations from foreign code).</simpara>
+<simpara>Debug and ReleaseSafe keep the guards on by default. ReleaseFast and ReleaseSmall assume you traded those traps for performance, so anything that slips past your invariants becomes undefined in practice.</simpara>
+</section>
+<section xml:id="illegal-behavior-guarded-example">
+<title>Example: Guarding Unchecked Arithmetic</title>
+<simpara>The following helper proves an addition safe with <literal>@addWithOverflow</literal>, then disables runtime safety for the final <literal>+</literal> to avoid redundant checks while saturating pathological inputs to the type&#8217;s maximum. <link xl:href="https://ziglang.org/documentation/master/#setruntimesafety">#setruntimesafety</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 37__illegal-behavior-and-safety-modes.adoc - include::example$chapters-data/code/37__illegal-behavior-and-safety-modes/01_guarded_runtime_safety.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 01_guarded_runtime_safety.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Running the same test with <literal>-OReleaseFast</literal> verifies that the guard continues to saturate rather than panic even when global runtime safety is absent.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="safety-modes">
+<title>Safety Defaults by Optimization Mode</title>
+<simpara>The current optimization mode is exposed as <literal>@import("builtin").mode</literal>, making it easy to surface which runtime checks will exist in a given artifact without consulting build scripts. <link xl:href="https://ziglang.org/documentation/master/#compile-variables">#compile variables</link> The table below summarizes the default contract each mode offers before you start opting in or out of checks manually.</simpara>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="3">
+<colspec colname="col_1" colwidth="25*"/>
+<colspec colname="col_2" colwidth="25*"/>
+<colspec colname="col_3" colwidth="50*"/>
+<thead>
+<row>
+<entry align="left" valign="top">Mode</entry>
+<entry align="left" valign="top">Runtime safety</entry>
+<entry align="left" valign="top">Typical intent</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara>Debug</simpara></entry>
+<entry align="left" valign="top"><simpara>Enabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Development builds with maximum diagnostics and stack traces.</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>ReleaseSafe</simpara></entry>
+<entry align="left" valign="top"><simpara>Enabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Production builds that still prefer predictable traps over silent corruption.</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>ReleaseFast</simpara></entry>
+<entry align="left" valign="top"><simpara>Disabled</simpara></entry>
+<entry align="left" valign="top"><simpara>High-performance binaries that assume invariants are already proven elsewhere.</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>ReleaseSmall</simpara></entry>
+<entry align="left" valign="top"><simpara>Disabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Size-constrained deliverables where every injected trap would be a liability.</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+<section xml:id="safety-modes-probe">
+<title>Instrumenting Safety at Runtime</title>
+<simpara>This probe prints the active mode and the implied safety default, then compares a checked addition with an unchecked one so you can see what survives when checks vanish.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 37__illegal-behavior-and-safety-modes.adoc - include::example$chapters-data/code/37__illegal-behavior-and-safety-modes/02_mode_probe.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 02_mode_probe.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">optimize-mode: Debug
+runtime-safety-default: true
+checked-add result=24 overflowed=true
+unchecked-add result=24</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Re-run the probe with <literal>-OReleaseFast</literal> to watch the default safety flag flip to <literal>false</literal> while the checked path still reports the overflow, helping you document feature flags or telemetry you might need in release builds.</simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="contracts-and-panics">
+<title>Contracts, Panics, and Recovery</title>
+<simpara>Stack traces are calmly terrifying when you trigger <literal>unreachable</literal> in a safety-enabled build. Treat them as the last line of defense after assertions and error unions have exhausted graceful exits. <link xl:href="https://ziglang.org/documentation/master/#reaching-unreachable-code">#reaching unreachable code</link></simpara>
+<simpara>Pairing that discipline with the error-handling techniques from earlier chapters keeps failure modes debuggable without sacrificing determinism. <link xl:href="04__errors-resource-cleanup.xml">4</link></simpara>
+<section xml:id="contracts-example">
+<title>Example: Asserting Digit Conversion</title>
+<simpara>Here we document an ASCII digit contract twice: once with an assertion that unlocks unchecked math and once with an error union for caller-friendly validation. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/debug.zig">debug.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 37__illegal-behavior-and-safety-modes.adoc - include::example$chapters-data/code/37__illegal-behavior-and-safety-modes/03_unreachable_contract.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 03_unreachable_contract.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara>The assertion-backed path compiles to a single subtraction in ReleaseFast, but it still panics in Debug if you pass a non-digit. Keep a defensive error-returning variant around for untrusted data.</simpara>
+</important>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Even in Debug mode, some pointer-based mistakes stay unchecked. Prefer slice-based APIs when you need bounds enforcement.</simpara>
+</listitem>
+<listitem>
+<simpara>Narrow the scope of <literal>@setRuntimeSafety(false)</literal> to the smallest possible block and prove the preconditions before toggling it.</simpara>
+</listitem>
+<listitem>
+<simpara>Capture panic stack traces in development and ship symbol files if you expect to triage ReleaseSafe crashes later.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>guardedUncheckedAdd</literal> to emit diagnostics when a sentinel-terminated slice would overflow the destination buffer, then measure the difference between safety-on and safety-off builds. <link xl:href="https://ziglang.org/documentation/master/#sentinel-terminated-arrays">#sentinel terminated arrays</link></simpara>
+</listitem>
+<listitem>
+<simpara>Write a benchmarking harness that loops through millions of safe additions, toggling <literal>@setRuntimeSafety</literal> per iteration to confirm the cost of the guard in each mode.</simpara>
+</listitem>
+<listitem>
+<simpara>Enhance the mode probe to log build metadata in your upcoming CLI project so scripts can warn when ReleaseFast binaries omit traps. <link xl:href="38__zig-cli-deep-dive.xml">38</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Failing to switch from <literal>+</literal> to <literal>@addWithOverflow</literal> in ReleaseFast risks silent wraparound that only manifests under rare load patterns.</simpara>
+</listitem>
+<listitem>
+<simpara>Runtime safety does not defend against concurrent data races. Pair these tools with the synchronization primitives introduced later in the book.</simpara>
+</listitem>
+<listitem>
+<simpara>When calling into C code, remember that Zig&#8217;s checks stop at the FFI boundary. Validate foreign inputs before trusting invariants. <link xl:href="33__c-interop-import-export-abi.xml">33</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

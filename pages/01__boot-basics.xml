@@ -1,0 +1,482 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Boot &amp; Basics</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Zig treats every source file as a namespaced module, and the compilation model revolves around explicitly wiring those units together with <literal>@import</literal>, keeping dependencies and program boundaries discoverable at a glance, as described in <link xl:href="https://ziglang.org/documentation/master/#Compilation-Model">#Compilation Model</link>. This chapter builds the first mile of that journey by showing how the root module, <literal>std</literal>, and <literal>builtin</literal> cooperate to produce a runnable program from a single file while preserving explicit control over targets and optimization modes.</simpara>
+<simpara>We also establish the ground rules for data and execution: how <literal>const</literal> and <literal>var</literal> guide mutability, why literals such as <literal>void {}</literal> matter for API design, how Zig handles default overflow, and how to select the right printing surface for the job, as described in <link xl:href="https://ziglang.org/documentation/master/#Values">#Values</link>. Along the way, we preview the release mode variants and buffered output helpers you will rely on in later chapters; see <link xl:href="https://ziglang.org/documentation/master/#Build-Mode">#Build-Mode</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Explain how Zig resolves modules through <literal>@import</literal> and the role of the root namespace.</simpara>
+</listitem>
+<listitem>
+<simpara>Describe how <literal>std.start</literal> discovers <literal>main</literal> and why entry points commonly return <literal>!void</literal>, as described in <link xl:href="https://ziglang.org/documentation/master/#Entry-Point">#Entry Point</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>const</literal>, <literal>var</literal>, and literal forms such as <literal>void {}</literal> to express intent about mutability and unit values.</simpara>
+</listitem>
+<listitem>
+<simpara>Choose between <literal>std.debug.print</literal>, unbuffered writers, and buffered stdout depending on the output channel and performance needs.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="section-1">
+<title>Starting from a Single Source File</title>
+<simpara>The fastest way to get something on screen in Zig is to lean on the default module graph: the root file you compile becomes the canonical namespace, and <literal>@import</literal> lets you reach everything from the standard library to compiler metadata. You will use these hooks constantly to align runtime behavior with build-time decisions.</simpara>
+</chapter>
+<chapter xml:id="_entry_point_selection">
+<title>Entry Point Selection</title>
+<simpara>The Zig compiler exports different entry point symbols based on the target platform, linking mode, and user declarations. This selection happens at compile time in <link xl:href="">lib/std/start.zig:28-100</link>.</simpara>
+<section xml:id="_entry_point_symbol_table">
+<title>Entry Point Symbol Table</title>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="5">
+<colspec colname="col_1" colwidth="20*"/>
+<colspec colname="col_2" colwidth="20*"/>
+<colspec colname="col_3" colwidth="20*"/>
+<colspec colname="col_4" colwidth="20*"/>
+<colspec colname="col_5" colwidth="20*"/>
+<thead>
+<row>
+<entry align="left" valign="top">Platform</entry>
+<entry align="left" valign="top">Link Mode</entry>
+<entry align="left" valign="top">Conditions</entry>
+<entry align="left" valign="top">Exported Symbol</entry>
+<entry align="left" valign="top">Handler Function</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara>POSIX/Linux</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>POSIX/Linux</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Linking libc</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>main</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>main()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>Windows</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wWinMainCRTStartup</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>WinStartup()</literal> / <literal>wWinMainCRTStartup()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>Windows</simpara></entry>
+<entry align="left" valign="top"><simpara>Dynamic Library</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_DllMainCRTStartup</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_DllMainCRTStartup()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>UEFI</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>EfiMain</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>EfiMain()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WASI</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable (command)</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wasi_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WASI</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable (reactor)</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_initialize</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wasi_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WebAssembly</simpara></entry>
+<entry align="left" valign="top"><simpara>Freestanding</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wasm_freestanding_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WebAssembly</simpara></entry>
+<entry align="left" valign="top"><simpara>Linking libc</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>__main_argc_argv</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>mainWithoutEnv()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>OpenCL/Vulkan</simpara></entry>
+<entry align="left" valign="top"><simpara>Kernel</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>main</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>spirvMain2()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>MIPS</simpara></entry>
+<entry align="left" valign="top"><simpara>Any</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>__start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>(same as <literal>_start</literal>)</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+</section>
+<section xml:id="_compile_time_entry_point_logic">
+<title>Compile-Time Entry Point Logic</title>
+<literallayout class="monospaced">graph TB
+    Start["comptime block&lt;br/&gt;(start.zig:28)"]
+    CheckMode["Check builtin.output_mode"]
+    CheckSimplified["simplified_logic?&lt;br/&gt;(stage2 backends)"]
+
+    CheckLinkC["link_libc or&lt;br/&gt;object_format == .c?"]
+    CheckWindows["builtin.os == .windows?"]
+    CheckUEFI["builtin.os == .uefi?"]
+    CheckWASI["builtin.os == .wasi?"]
+    CheckWasm["arch.isWasm() &amp;&amp;&lt;br/&gt;os == .freestanding?"]
+
+    ExportMain["@export(&amp;main, 'main')"]
+    ExportWinMain["@export(&amp;WinStartup,&lt;br/&gt;'wWinMainCRTStartup')"]
+    ExportStart["@export(&amp;_start, '_start')"]
+    ExportEfi["@export(&amp;EfiMain, 'EfiMain')"]
+    ExportWasi["@export(&amp;wasi_start,&lt;br/&gt;wasm_start_sym)"]
+    ExportWasmStart["@export(&amp;wasm_freestanding_start,&lt;br/&gt;'_start')"]
+
+    Start --&gt; CheckMode
+    CheckMode --&gt;|".Exe or has main"| CheckSimplified
+    CheckSimplified --&gt;|"true"| Simple["Simplified logic&lt;br/&gt;(lines 33-51)"]
+    CheckSimplified --&gt;|"false"| CheckLinkC
+
+    CheckLinkC --&gt;|"yes"| ExportMain
+    CheckLinkC --&gt;|"no"| CheckWindows
+    CheckWindows --&gt;|"yes"| ExportWinMain
+    CheckWindows --&gt;|"no"| CheckUEFI
+    CheckUEFI --&gt;|"yes"| ExportEfi
+    CheckUEFI --&gt;|"no"| CheckWASI
+    CheckWASI --&gt;|"yes"| ExportWasi
+    CheckWASI --&gt;|"no"| CheckWasm
+    CheckWasm --&gt;|"yes"| ExportWasmStart
+    CheckWasm --&gt;|"no"| ExportStart</literallayout>
+</section>
+<section xml:id="section-1-sub-a">
+<title>Modules and Imports</title>
+<simpara>The root module is just your top-level file, so any declarations you mark <literal>pub</literal> are immediately re-importable under <literal>@import("root")</literal>. Pair that with <literal>@import("builtin")</literal> to inspect the target chosen by your current compiler invocation, as described in <link xl:href="https://ziglang.org/documentation/master/#Builtin-Functions">#Builtin-Functions</link>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 01__boot-basics.adoc - include::example$chapters-data/code/01__boot-basics/imports.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run imports.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">app: Boot Basics Tour
+optimize mode: Debug
+target: x86_64-linux-gnu</programlisting>
+</para>
+</formalpara>
+<simpara>Actual target identifiers depend on your host triple; the important part is seeing how <literal>@tagName</literal> exposes each enum so you can branch on them later.</simpara>
+<simpara>Because the buffered stdout writer batches data, always call <literal>flush()</literal> before exiting so the terminal receives the final line.</simpara>
+<tip>
+<simpara>Reach for <literal>@import("root")</literal> to surface configuration constants without baking extra globals into your namespace.</simpara>
+</tip>
+</section>
+<section xml:id="section-1-sub-b">
+<title>Entry Points and Early Errors</title>
+<simpara>Zig&#8217;s runtime glue (<literal>std.start</literal>) looks for a <literal>pub fn main</literal>, forwards command-line state, and treats an error return as a signal to abort with diagnostics. Because <literal>main</literal> commonly performs I/O, giving it the <literal>!void</literal> return type keeps error propagation explicit.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 01__boot-basics.adoc - include::example$chapters-data/code/01__boot-basics/entry_point.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run entry_point.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Zig entry point reporting in.</programlisting>
+</para>
+</formalpara>
+<simpara>In release modes (<literal>zig run -OReleaseFast &#8230;&#8203;</literal>), the <literal>ModeError.ReleaseOnly</literal> branch fires and the warning surfaces before the program continues, neatly demonstrating how <literal>catch</literal> converts errors into user-facing diagnostics without suppressing later work.</simpara>
+</section>
+<section xml:id="section-1-sub-b2">
+<title>How <literal>main()</literal> Return Types Are Handled</title>
+<simpara>Zig&#8217;s startup code in <literal>std.start</literal> inspects your <literal>main()</literal> function&#8217;s return type at compile time and generates appropriate handling logic. This flexibility allows you to choose the signature that best fits your program&#8217;s needs—whether you want simple success/failure semantics with <literal>!void</literal>, explicit exit codes with <literal>u8</literal>, or an infinite event loop with <literal>noreturn</literal>. The <literal>callMain()</literal> function orchestrates this dispatch, ensuring errors are logged and exit codes propagate correctly to the operating system.</simpara>
+<section xml:id="_callmain_return_type_handling">
+<title>callMain Return Type Handling</title>
+<simpara>The <literal>callMain()</literal> function handles different return type signatures from the user&#8217;s <literal>main()</literal>:</simpara>
+<literallayout class="monospaced">graph TB
+    Start["callMain()"]
+
+    GetRetType["ReturnType = @TypeOf(root.main)&lt;br/&gt;.return_type"]
+
+    CheckType["switch ReturnType"]
+
+    Void["void"]
+    CallVoid["root.main()&lt;br/&gt;return 0"]
+
+    NoReturn["noreturn"]
+    CallNoReturn["return root.main()"]
+
+    U8["u8"]
+    CallU8["return root.main()"]
+
+    ErrorUnion["error union"]
+
+    CheckInner["@TypeOf(result)?"]
+
+    InnerVoid["void"]
+    ReturnZero["return 0"]
+
+    InnerU8["u8"]
+    ReturnResult["return result"]
+
+    Invalid["@compileError"]
+
+    CallCatch["result = root.main()&lt;br/&gt;catch |err|"]
+
+    LogError["Log error name&lt;br/&gt;and stack trace&lt;br/&gt;(lines 707-712)"]
+
+    ReturnOne["return 1"]
+
+    Start --&gt; GetRetType
+    GetRetType --&gt; CheckType
+    CheckType --&gt; Void
+    CheckType --&gt; NoReturn
+    CheckType --&gt; U8
+    CheckType --&gt; ErrorUnion
+    CheckType --&gt; Invalid
+
+    Void --&gt; CallVoid
+    NoReturn --&gt; CallNoReturn
+    U8 --&gt; CallU8
+
+    ErrorUnion --&gt; CallCatch
+    CallCatch --&gt; CheckInner
+    CallCatch --&gt; LogError
+    LogError --&gt; ReturnOne
+
+    CheckInner --&gt; InnerVoid
+    CheckInner --&gt; InnerU8
+    CheckInner --&gt; Invalid
+
+    InnerVoid --&gt; ReturnZero
+    InnerU8 --&gt; ReturnResult</literallayout>
+<simpara>Valid return types from <literal>main()</literal>:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><literal>void</literal> - Returns exit code 0</simpara>
+</listitem>
+<listitem>
+<simpara><literal>noreturn</literal> - Never returns (infinite loop or explicit exit)</simpara>
+</listitem>
+<listitem>
+<simpara><literal>u8</literal> - Returns exit code directly</simpara>
+</listitem>
+<listitem>
+<simpara><literal>!void</literal> - Returns 0 on success, 1 on error (logs error with stack trace)</simpara>
+</listitem>
+<listitem>
+<simpara><literal>!u8</literal> - Returns exit code on success, 1 on error (logs error with stack trace)</simpara>
+</listitem>
+</itemizedlist>
+<simpara>The <literal>!void</literal> signature used in our examples provides the best balance: explicit error handling with automatic logging and appropriate exit codes.</simpara>
+</section>
+</section>
+<section xml:id="section-1-sub-c">
+<title>Naming and Scope Preview</title>
+<simpara>Variables obey lexical scope: every block introduces a new region where you may shadow or extend bindings, while <literal>const</literal> and <literal>var</literal> signal immutability versus mutability and help the compiler reason about safety, as described in <link xl:href="https://ziglang.org/documentation/master/#Blocks">#Blocks</link>. Zig defers a deeper discussion of style and shadowing to Chapter 38, but keep in mind that thoughtful naming at the top level (often via <literal>pub const</literal>) is the idiomatic way to share configuration between files; see <link xl:href="https://ziglang.org/documentation/master/#Variables">#Variables</link>.</simpara>
+</section>
+</chapter>
+<chapter xml:id="section-2">
+<title>Working with Values and Builds</title>
+<simpara>Once you have an entry point, the next stop is data: numeric types come in explicitly sized flavors (<literal>iN</literal>, <literal>uN</literal>, <literal>fN</literal>), literals infer their type from context, and Zig uses debug safety checks to trap overflows unless you opt into wrapping or saturating operators. Build modes (<literal>-O</literal> flags) decide which checks remain in place and how aggressively the compiler optimizes.</simpara>
+<section xml:id="section-2-sub-a">
+<title>Optimization Modes</title>
+<simpara>Zig provides four optimization modes that control the trade-offs between code speed, binary size, and safety checks:</simpara>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="6">
+<colspec colname="col_1" colwidth="16.6666*"/>
+<colspec colname="col_2" colwidth="16.6666*"/>
+<colspec colname="col_3" colwidth="16.6666*"/>
+<colspec colname="col_4" colwidth="16.6666*"/>
+<colspec colname="col_5" colwidth="16.6666*"/>
+<colspec colname="col_6" colwidth="16.667*"/>
+<thead>
+<row>
+<entry align="left" valign="top">Mode</entry>
+<entry align="left" valign="top">Priority</entry>
+<entry align="left" valign="top">Safety Checks</entry>
+<entry align="left" valign="top">Speed</entry>
+<entry align="left" valign="top">Binary Size</entry>
+<entry align="left" valign="top">Use Case</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara><literal>Debug</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Safety + Debug Info</simpara></entry>
+<entry align="left" valign="top"><simpara>✓ All enabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Slowest</simpara></entry>
+<entry align="left" valign="top"><simpara>Largest</simpara></entry>
+<entry align="left" valign="top"><simpara>Development and debugging</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>ReleaseSafe</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Speed + Safety</simpara></entry>
+<entry align="left" valign="top"><simpara>✓ All enabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Fast</simpara></entry>
+<entry align="left" valign="top"><simpara>Large</simpara></entry>
+<entry align="left" valign="top"><simpara>Production with safety</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>ReleaseFast</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Maximum Speed</simpara></entry>
+<entry align="left" valign="top"><simpara>✗ Disabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Fastest</simpara></entry>
+<entry align="left" valign="top"><simpara>Medium</simpara></entry>
+<entry align="left" valign="top"><simpara>Performance-critical production</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>ReleaseSmall</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Minimum Size</simpara></entry>
+<entry align="left" valign="top"><simpara>✗ Disabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Fast</simpara></entry>
+<entry align="left" valign="top"><simpara>Smallest</simpara></entry>
+<entry align="left" valign="top"><simpara>Embedded systems, size-constrained</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+<simpara>The optimization mode is specified via the <literal>-O</literal> flag and affects:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Runtime safety checks (overflow, bounds checking, null checks)</simpara>
+</listitem>
+<listitem>
+<simpara>Stack traces and debug information generation</simpara>
+</listitem>
+<listitem>
+<simpara>LLVM optimization level (when using the LLVM backend)</simpara>
+</listitem>
+<listitem>
+<simpara>Inlining heuristics and code generation strategies</simpara>
+</listitem>
+</itemizedlist>
+<literallayout class="monospaced">graph TB
+    subgraph "Optimization Mode Effects"
+        OptMode["optimize_mode: OptimizeMode"]
+
+        OptMode --&gt; SafetyChecks["Runtime Safety Checks"]
+        OptMode --&gt; DebugInfo["Debug Information"]
+        OptMode --&gt; CodegenStrategy["Codegen Strategy"]
+        OptMode --&gt; LLVMOpt["LLVM Optimization Level"]
+
+        SafetyChecks --&gt; Overflow["Integer overflow checks"]
+        SafetyChecks --&gt; Bounds["Bounds checking"]
+        SafetyChecks --&gt; Null["Null pointer checks"]
+        SafetyChecks --&gt; Unreachable["Unreachable assertions"]
+
+        DebugInfo --&gt; StackTraces["Stack traces"]
+        DebugInfo --&gt; DWARF["DWARF debug info"]
+        DebugInfo --&gt; LineInfo["Source line information"]
+
+        CodegenStrategy --&gt; Inlining["Inlining heuristics"]
+        CodegenStrategy --&gt; Unrolling["Loop unrolling"]
+        CodegenStrategy --&gt; Vectorization["SIMD vectorization"]
+
+        LLVMOpt --&gt; O0["Debug: -O0"]
+        LLVMOpt --&gt; O2Safe["ReleaseSafe: -O2 + safety"]
+        LLVMOpt --&gt; O3["ReleaseFast: -O3"]
+        LLVMOpt --&gt; Oz["ReleaseSmall: -Oz"]
+    end</literallayout>
+<simpara>In this chapter we use <literal>Debug</literal> (the default) for development and preview <literal>ReleaseFast</literal> to demonstrate how optimization choices affect behavior and binary characteristics.</simpara>
+</section>
+<section xml:id="workflow-1">
+<title>Values, Literals, and Debug Printing</title>
+<simpara><literal>std.debug.print</literal> writes to stderr and is perfect for early experiments; it accepts any value you throw at it, revealing how <literal>@TypeOf</literal> and friends reflect on literals.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 01__boot-basics.adoc - include::example$chapters-data/code/01__boot-basics/values_and_literals.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run values_and_literals.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">counter=3 ratio=0.5 safety=true
+newline byte=10 (ASCII)
+unit literal has type void</programlisting>
+</para>
+</formalpara>
+<simpara>Treat <literal>void {}</literal> as a communicative literal indicating "nothing to configure," and remember that debug prints default to stderr so they never interfere with stdout pipelines.</simpara>
+</section>
+<section xml:id="workflow-2">
+<title>Buffering stdout and Build Modes</title>
+<simpara>When you want deterministic stdout with fewer syscalls, borrow a buffer and flush once—especially in release profiles where throughput matters. The example below shows how to set up a buffered writer around <literal>std.fs.File.stdout()</literal> and highlights the differences between build modes.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 01__boot-basics.adoc - include::example$chapters-data/code/01__boot-basics/buffered_stdout.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe buffered_stdout.zig -OReleaseFast
+$
+$ ./buffered_stdout</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Buffering saves syscalls.
+Flush once at the end.</programlisting>
+</para>
+</formalpara>
+<simpara>Using a buffered writer mirrors the standard library&#8217;s own initialization template and keeps writes cohesive; always flush before exiting to guarantee the OS sees your final message.</simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.debug.print</literal> targets stderr and bypasses stdout buffering, so reserve it for diagnostics even in simple tools.</simpara>
+</listitem>
+<listitem>
+<simpara>Wrapping (<literal>%`) and saturating (`|</literal>) arithmetic are available when you deliberately want to skip overflow traps; the default operators still panic in Debug mode to catch mistakes early, as documented in <link xl:href="https://ziglang.org/documentation/master/#Operators">#Operators</link>.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.fs.File.stdout().writer(&amp;buffer)</literal> mirrors the patterns used by <literal>zig init</literal> and requires an explicit <literal>flush()</literal> to push buffered bytes downstream.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>imports.zig</literal> to print the pointer size reported by <literal>@sizeOf(usize)</literal> and compare targets by toggling <literal>-Dtarget</literal> values on the command line.</simpara>
+</listitem>
+<listitem>
+<simpara>Refactor <literal>entry_point.zig</literal> so that <literal>requireDebugSafety</literal> returns a descriptive error union (<literal>error{ReleaseOnly}![]const u8</literal>) and have <literal>main</literal> write the message to stdout before rethrowing.</simpara>
+</listitem>
+<listitem>
+<simpara>Build <literal>buffered_stdout.zig</literal> with <literal>-OReleaseSafe</literal> and <literal>-OReleaseSmall</literal>, measuring the binary sizes to see how optimization choices impact deployment footprints.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

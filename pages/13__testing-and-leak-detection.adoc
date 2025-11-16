@@ -1,0 +1,297 @@
+////
+changes: ["New chapter: testing, leaks, and OOM injection"]
+examples_compile: yes
+keywords: ["std.testing", "allocator", "leak detection", "OOM injection"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "14__project-path-utility"
+open_questions: []
+previous_chapter: "12__config-as-data"
+status: draft
+xref_complete: true
+////
+
+= Testing & Leak Detection
+:chapter-number: 13
+:chapter-slug: testing-and-leak-detection
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Good tests are short, precise, and mean what they say. Zig’s `std.testing` makes this easy with small, composable assertions (`expect`, `expectEqual`, `expectError`) and a built-in testing allocator that detects leaks by default. Combined with allocation-failure injection, you can exercise error paths that would otherwise be hard to trigger, ensuring your code releases resources correctly and deterministically; see xref:10__allocators-and-memory-management.adoc[10] and link:https://github.com/ziglang/zig/tree/master/lib/std/testing.zig[testing.zig].
+
+This chapter shows how to write expressive tests, how to interpret the test runner’s leak diagnostics, and how to use `std.testing.checkAllAllocationFailures` to bulletproof code against `error.OutOfMemory` without writing hundreds of bespoke tests; see xref:11__project-dynamic-string-builder.adoc[11] and link:https://github.com/ziglang/zig/tree/master/lib/std/heap.zig[heap.zig].
+
+[[learning-goals]]
+== Learning Goals
+
+* Write focused unit tests using `test` blocks and `std.testing` helpers.
+* Detect and fix memory leaks using `std.testing.allocator` and `defer` in tests; see xref:04__errors-resource-cleanup.adoc[04].
+* Use `std.testing.checkAllAllocationFailures` to systematically test OOM behavior; see xref:10__allocators-and-memory-management.adoc[10].
+
+[[testing-basics]]
+== Testing basics with std.testing
+
+Zig's test runner discovers `test` blocks in any file you pass to `zig test`. Assertions are ordinary functions that return errors, so they compose naturally with `try`/`catch`.
+
+[[testing-framework-structure]]
+=== The std.testing Module Structure
+
+Before diving into specific assertions, it is helpful to see the complete toolkit available in `std.testing`. The module provides three categories of functionality: assertion functions, test allocators, and utilities.
+
+[mermaid]
+....
+graph TB
+    subgraph "std.testing Module"
+        MAIN["std.testing<br/>(lib/std/testing.zig)"]
+
+        subgraph "Assertion Functions"
+            EXPECT["expect()"]
+            EXPECT_EQ["expectEqual()"]
+            EXPECT_ERR["expectError()"]
+            EXPECT_SLICES["expectEqualSlices()"]
+            EXPECT_STR["expectEqualStrings()"]
+            EXPECT_FMT["expectFmt()"]
+        end
+
+        subgraph "Test Allocators"
+            TEST_ALLOC["allocator<br/>(GeneralPurposeAllocator)"]
+            FAIL_ALLOC["failing_allocator<br/>(FailingAllocator)"]
+        end
+
+        subgraph "Utilities"
+            RAND_SEED["random_seed"]
+            TMP_DIR["tmpDir()"]
+            LOG_LEVEL["log_level"]
+        end
+
+        MAIN --> EXPECT
+        MAIN --> EXPECT_EQ
+        MAIN --> EXPECT_ERR
+        MAIN --> EXPECT_SLICES
+        MAIN --> EXPECT_STR
+        MAIN --> EXPECT_FMT
+        MAIN --> TEST_ALLOC
+        MAIN --> FAIL_ALLOC
+        MAIN --> RAND_SEED
+        MAIN --> TMP_DIR
+        MAIN --> LOG_LEVEL
+    end
+....
+
+This chapter focuses on the core assertions (`expect`, `expectEqual`, `expectError`) and the test allocators for leak detection. Additional assertion functions like `expectEqualSlices` and `expectEqualStrings` provide specialized comparisons, while utilities like `tmpDir()` help test filesystem code; see link:https://github.com/ziglang/zig/blob/master/lib/std/testing.zig[testing.zig].
+
+[[testing-basics-expect]]
+=== Expectations: booleans, equality, and errors
+
+This example covers boolean assertions, value equality, string equality, and expecting an error from a function under test.
+
+[source,zig]
+----
+include::{sourcedir}/13__testing-and-leak-detection/basic_tests.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test basic_tests.zig
+----
+
+.Output
+[source,shell]
+----
+All 3 tests passed.
+----
+
+
+
+[[leak-detection]]
+== Leak detection by construction
+
+The testing allocator (`std.testing.allocator`) is a `GeneralPurposeAllocator` configured to track allocations and report leaks when a test finishes. That means your tests fail if they forget to free; see xref:10__allocators-and-memory-management.adoc[10].
+
+[[test-allocator-architecture]]
+=== How Test Allocators Work
+
+The testing module provides two allocators: `allocator` for general testing with leak detection, and `failing_allocator` for simulating allocation failures. Understanding their architecture helps explain their different behaviors.
+
+[mermaid]
+....
+graph TB
+    subgraph "Test Allocators in lib/std/testing.zig"
+        ALLOC_INST["allocator_instance<br/>GeneralPurposeAllocator"]
+        ALLOC["allocator<br/>Allocator interface"]
+
+        BASE_INST["base_allocator_instance<br/>FixedBufferAllocator"]
+        FAIL_INST["failing_allocator_instance<br/>FailingAllocator"]
+        FAIL["failing_allocator<br/>Allocator interface"]
+
+        ALLOC_INST -->|"allocator()"| ALLOC
+        BASE_INST -->|"provides base"| FAIL_INST
+        FAIL_INST -->|"allocator()"| FAIL
+    end
+
+    subgraph "Usage in Tests"
+        TEST["test block"]
+        ALLOC_CALL["std.testing.allocator.alloc()"]
+        FAIL_CALL["std.testing.failing_allocator.alloc()"]
+
+        TEST --> ALLOC_CALL
+        TEST --> FAIL_CALL
+    end
+
+    ALLOC --> ALLOC_CALL
+    FAIL --> FAIL_CALL
+....
+
+The `testing.allocator` wraps a `GeneralPurposeAllocator` configured with stack traces and leak detection. The `failing_allocator` uses a `FixedBufferAllocator` as its base, then wraps it with failure injection logic. Both expose the standard `Allocator` interface, making them drop-in replacements for production allocators in tests; see link:https://github.com/ziglang/zig/blob/master/lib/std/testing.zig[testing.zig].
+
+[[leak-detection-fail]]
+=== What a leak looks like
+
+The test below intentionally forgets to `free`. The runner reports a leaked address, a stack trace to the allocating callsite, and exits with a non-zero status.
+
+[source,zig]
+----
+include::{sourcedir}/13__testing-and-leak-detection/leak_demo_fail.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test leak_demo_fail.zig
+----
+
+.Output
+[source,shell]
+----
+[gpa] (err): memory address 0x… leaked: 
+… leak_demo_fail.zig:1:36: … in test.leak detection catches a missing free (leak_demo_fail.zig)
+
+All 1 tests passed.
+1 errors were logged.
+1 tests leaked memory.
+error: the following test command failed with exit code 1:
+…/test --seed=0x…
+----
+
+IMPORTANT: The "All N tests passed." line only asserts test logic; the leak report still causes the overall run to fail. Fix the leak to make the suite green. xref:04__errors-resource-cleanup.adoc[04]
+
+[[leak-detection-fix]]
+=== Fixing leaks with defer
+
+Use `defer allocator.free(buf)` immediately after a successful allocation to guarantee release along all paths.
+
+[source,zig]
+----
+include::{sourcedir}/13__testing-and-leak-detection/leak_demo_fix.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test leak_demo_fix.zig
+----
+
+.Output
+[source,shell]
+----
+All 1 tests passed.
+----
+
+xref:04__errors-resource-cleanup.adoc[04], link:https://github.com/ziglang/zig/tree/master/lib/std/mem.zig[mem.zig]
+
+[[leak-detection-flow]]
+=== The Leak Detection Lifecycle
+
+Leak detection happens automatically at the end of each test. Understanding this timeline helps explain why `defer` must execute before the test completes and why leak reports appear even when test assertions pass.
+
+[mermaid]
+....
+graph TB
+    TEST_START["Test Start"]
+    ALLOC_MEM["Allocate Memory<br/>const data = try testing.allocator.alloc(T, n);"]
+    USE_MEM["Use Memory"]
+    FREE_MEM["Free Memory<br/>defer testing.allocator.free(data);"]
+    TEST_END["Test End<br/>Allocator checks for leaks"]
+
+    TEST_START --> ALLOC_MEM
+    ALLOC_MEM --> USE_MEM
+    USE_MEM --> FREE_MEM
+    FREE_MEM --> TEST_END
+
+    LEAK_CHECK["If leaked: Test fails with<br/>stack trace of allocation"]
+    TEST_END -.->|"Memory not freed"| LEAK_CHECK
+....
+
+When a test ends, the `GeneralPurposeAllocator` verifies that all allocated memory has been freed. If any allocations remain, it prints the stack trace showing where the leaked memory was allocated (not where it should have been freed). This automatic checking eliminates entire categories of bugs without requiring manual tracking. The key is placing `defer allocator.free(...)` immediately after successful allocation so it executes on all code paths, including early returns and error propagation; see link:https://github.com/ziglang/zig/blob/master/lib/std/heap.zig[heap.zig].
+
+[[oom-injection]]
+== Allocation-failure injection
+
+Code that allocates memory must be correct even when allocations fail. `std.testing.checkAllAllocationFailures` reruns your function with a failing allocator at each allocation site, verifying you clean up partially-initialized state and propagate `error.OutOfMemory` properly; see xref:10__allocators-and-memory-management.adoc[10].
+
+[[oom-injection-good]]
+=== Systematically testing for OOM safety
+
+This example uses `checkAllAllocationFailures` with a small function that performs two allocations and frees both with `defer`. The helper simulates failure at each allocation point; the test passes only if no leaks occur and `error.OutOfMemory` is forwarded correctly.
+
+[source,zig]
+----
+include::{sourcedir}/13__testing-and-leak-detection/oom_injection.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test oom_injection.zig
+----
+
+.Output
+[source,shell]
+----
+All 1 tests passed.
+----
+
+NOTE: A deliberately "bad" implementation under `checkAllAllocationFailures` will cause the test runner to record leaked allocations and fail the overall run, even if you `expectError(error.MemoryLeakDetected, …)`. Keep failing examples isolated when teaching or debugging; see xref:10__allocators-and-memory-management.adoc[10].
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* The testing allocator is only available when compiling tests. Attempting to use it in non-test code triggers a compile error.
+* Leak detection relies on deterministic deallocation. Prefer `defer` directly after allocation; avoid hidden control flow that skips frees; see xref:04__errors-resource-cleanup.adoc[04].
+* For integration tests that need lots of allocations, wrap with an arena allocator for speed, but still route ultimate backing through the testing allocator to preserve leak checks; see xref:10__allocators-and-memory-management.adoc[10].
+
+[[exercises]]
+== Exercises
+
+* Write a function that builds a `std.ArrayList(u8)` from input bytes, then clears it. Use `checkAllAllocationFailures` to verify OOM safety; see xref:11__project-dynamic-string-builder.adoc[11].
+* Introduce a deliberate early return after the first allocation and watch the leak detector catch a missing `free`; then fix it with `defer`.
+* Add `expectError` tests for a function that returns an error on invalid input; include both the erroring and the successful path.
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* If you need to run a suite that intentionally demonstrates leaks, keep those files separate from your passing tests to avoid failing CI runs. Alternatively, gate them behind a build flag and only opt in locally; see xref:20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.adoc[20].
+* Outside of tests, you can enable `std.heap.GeneralPurposeAllocator` leak detection in debug builds to catch leaks in manual runs, but production builds should disable expensive checks for performance.
+* Allocation-failure injection is most effective on small, self-contained helpers. For higher-level workflows, test critical components in isolation to keep the induced failure space manageable; see xref:36__style-and-best-practices.adoc[37].

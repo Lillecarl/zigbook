@@ -1,0 +1,163 @@
+////
+changes: ["Initial draft for Safe File Copier project chapter", "Clarified argument lifetime duplication and regular-file check"]
+examples_compile: yes
+keywords: ["cli", "filesystem", "copy", "atomic", "errdefer"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "08__user-types-structs-enums-unions"
+open_questions: []
+previous_chapter: "06__project-grep-lite"
+status: draft
+xref_complete: true
+////
+
+= Project: Safe File Copier
+:chapter-number: 7
+:chapter-slug: project-safe-file-copier
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Our third project turns file I/O up a notch: build a small, robust file copier that is safe by default, emits clear diagnostics, and cleans up after itself. We’ll connect the dots from Chapter 4’s `defer`/`errdefer` patterns to real-world error handling while showcasing the standard library’s atomic copy helpers; see xref:04__errors-resource-cleanup.adoc#overview[04] and link:https://github.com/ziglang/zig/tree/master/lib/std/fs/Dir.zig[Dir.zig].
+
+Two approaches illustrate the trade-offs:
+
+* High-level: a single call to `std.fs.Dir.copyFile` performs an atomic copy and preserves file mode.
+* Manual streaming: open, read, and write with `defer` and `errdefer`, deleting partial outputs if anything fails, as described in link:https://ziglang.org/documentation/master/#defer-and-errdefer[#defer and errdefer] and link:https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig[File.zig].
+
+[[learning-goals]]
+== Learning Goals
+
+* Design a CLI that refuses to overwrite existing files unless explicitly forced, as described in link:https://ziglang.org/documentation/master/#Command-line-flags[#Command-line-flags].
+* Use `defer`/`errdefer` to guarantee resource cleanup and remove partial files on failure.
+* Choose between `Dir.copyFile` for atomic convenience and manual streaming for fine-grained control.
+
+[[section-1]]
+== Correctness First: Safe-by-Default CLI
+
+Clobbering a user’s data is unforgivable. This tool adopts a conservative stance: unless `--force` is provided, an existing destination aborts the copy. We also validate that the source is a regular file and keep stdout silent on success so scripts can treat “no output” as a good sign, as described in link:https://ziglang.org/documentation/master/#Error-Handling[#Error-Handling].
+
+[[section-1-sub-a]]
+=== Aborting on Existing Destinations
+
+We probe the destination path first. If present and `--force` is absent, we print a single-line diagnostic and exit with a non-zero status. This mirrors common Unix utilities and makes failures unambiguous.
+
+[[section-2]]
+== Atomic Copy in One Call
+
+Leverage the standard library when possible. `Dir.copyFile` uses a temporary file and renames it into place, which means callers never observe a partially written destination even if the process crashes mid-copy. File mode is preserved by default; timestamps are handled by `updateFile` if you need them, which we mention below.
+
+[source,zig]
+----
+
+include::{sourcedir}/07__project-safe-file-copier/safe_copy.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ printf 'hello, copier!\n' > from.txt
+$ zig run safe_copy.zig -- from.txt to.txt
+----
+
+.Output
+[source,shell]
+----
+(no output)
+----
+
+TIP: `copyFile` overwrites existing files. Our wrapper checks for existence first and requires `--force` to clobber. Prefer `Dir.updateFile` if you want to also preserve atime/mtime.
+
+[[workflow-1]]
+=== Overwrite with Intent
+
+When an output already exists, demonstrate explicit overwrite:
+
+[source,shell]
+----
+$ printf 'v1\n' > from.txt
+$ printf 'old\n' > to.txt
+$ zig run safe_copy.zig -- from.txt to.txt
+error: destination exists; pass --force to overwrite
+$ zig run safe_copy.zig -- --force from.txt to.txt
+----
+
+.Output
+[source,shell]
+----
+error: destination exists; pass --force to overwrite
+(no output)
+----
+
+NOTE: Success remains quiet by design; combine with `echo $?` to consume status codes in scripts.
+
+[[section-3]]
+== Manual Streaming with defer/errdefer
+
+For fine-grained control (or as a learning exercise), wire a `Reader` to a `Writer` and stream the bytes yourself. The crucial bit is `errdefer` to remove the destination if anything goes wrong after creation—this prevents leaving a truncated file behind.
+
+[source,zig]
+----
+
+include::{sourcedir}/07__project-safe-file-copier/copy_stream.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ printf 'stream me\n' > src.txt
+$ zig run copy_stream.zig -- src.txt dst.txt
+----
+
+.Output
+[source,shell]
+----
+(no output)
+----
+
+IMPORTANT: When creating the destination with `.exclusive = true`, the open fails if the file already exists. That, plus `errdefer deleteFile`, gives strong safety guarantees without races in typical single-process scenarios.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Atomic semantics: `Dir.copyFile` creates a temporary file and renames it into place, avoiding partial reads by other processes. On older Linux kernels, power loss may leave a temp file; see the function’s doc comment for details.
+* Preserving timestamps: prefer `Dir.updateFile` when you need atime/mtime to match the source, in addition to content and mode.
+* Performance hints: the `Writer` interface uses platform accelerations (`sendfile`, `copy_file_range`, or `fcopyfile`) when available, falling back to buffered loops; see link:https://github.com/ziglang/zig/tree/master/lib/std/posix.zig[posix.zig].
+* CLI lifetimes: duplicate `args` strings before freeing them to avoid dangling `[]u8` slices (both examples use `allocator.dupe`); see link:https://github.com/ziglang/zig/tree/master/lib/std/process.zig[process.zig].
+* Sanity checks: open the source first, then `stat()` it and require `kind == .file` to reject directories and special files.
+
+[[exercises]]
+== Exercises
+
+* Add a `--no-clobber` flag that forces an error even when `--force` is also present—then emit a helpful message suggesting which one to remove.
+* Implement `--preserve-times` by switching to `Dir.updateFile` and verifying via `stat` that timestamps match.
+* Teach the tool to copy file permissions from a numeric mode override (e.g., `--mode=0644`) using `CopyFileOptions.override_mode`
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases:
+
+* Copying special files (directories, fifos, devices) is intentionally rejected in these examples; handle them explicitly or skip.
+* Cross-filesystem moves: copying plus `deleteFile` is safer than `rename` when devices differ; Zig’s helpers do the right thing given a content copy.
+* Very large files: prefer the high-level copy first; manual loops should chunk reads and handle short writes carefully if you don’t use the `Writer` interface.

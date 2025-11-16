@@ -1,0 +1,188 @@
+////
+changes: ["Initial Random and Math chapter for Zig 0.15.2"]
+examples_compile: yes
+keywords: ["random", "math", "hash", "sha256", "prng"]
+last_updated: 2025-11-06
+last_verified: 2025-11-06
+previous_chapter: "49__compression-and-archives"
+next_chapter: "51__mem-and-meta-utilities"
+status: draft
+xref_complete: true
+open_questions: []
+////
+
+= Random and Math
+:chapter-number: 50
+:chapter-slug: random-and-math
+:creative-commons:
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+With compression pipelines in place from xref:49__compression-and-archives.adoc[the previous chapter], we now zoom in on the numeric engines that feed those workflows: deterministic pseudo-random number generators, well-behaved math helpers, and hashing primitives that balance speed and security. Zig 0.15.2 keeps these components modular—`std.Random` builds reproducible sequences, `std.math` provides careful tolerances and constants, and the stdlib splits hashing into non-crypto and crypto families so you can choose the right tool per workload. link:https://github.com/ziglang/zig/tree/master/lib/std/math.zig[math.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/hash/wyhash.zig[wyhash.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/crypto/sha2.zig[sha2.zig]
+
+[[learning-goals]]
+== Learning Goals
+
+* Seed, advance, and reproduce `std.Random` generators while sampling common distributions. link:https://github.com/ziglang/zig/tree/master/lib/std/Random/Xoshiro256.zig[Xoshiro256.zig]
+* Apply `std.math` utilities—constants, clamps, tolerances, and geometry helpers—to keep numeric code stable. link:https://github.com/ziglang/zig/tree/master/lib/std/math/hypot.zig[hypot.zig]
+* Distinguish fast hashers like Wyhash from cryptographic digests such as SHA-256, and wire both into file-processing jobs responsibly.
+
+[[random-foundations]]
+== Random number foundations
+
+Zig exposes pseudo-random generators as first-class values: you seed an engine, ask it for integers, floats, or indices, and your code owns the state transitions. That transparency gives you control over fuzzers, simulations, and deterministic tests. link:https://github.com/ziglang/zig/tree/master/lib/std/Random.zig[Random.zig]
+
+[[random-foundations-prngs]]
+=== Deterministic generators with reproducible sequences
+
+`std.Random.DefaultPrng` wraps `Xoshiro256++`, seeding itself via SplitMix64 when you call `init(seed)`. From there you obtain a `Random` facade that exposes high-level helpers—ranges, shuffles, floats—while keeping the underlying state private.
+
+[source,zig]
+----
+include::{sourcedir}/50__random-and-math/prng_sequences.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run prng_sequences.zig
+----
+
+.Output
+[source,shell]
+----
+seed=0x00067B20
+d6 roll -> 5
+coin flip -> tails
+shuffled ladder -> { 0, 4, 3, 2, 5, 1 }
+unit float -> 0.742435
+first three u32 -> { 2135551917, 3874178402, 2563214192 }
+----
+
+TIP: The fairness guarantees of `uintLessThan` hinge on the generator’s uniform output; fall back to `uintLessThanBiased` when constant-time behavior matters more than perfect distribution.
+
+[[random-foundations-distributions]]
+=== Working with distributions and sampling heuristics
+
+Beyond uniform draws, `Random.floatNorm` and `Random.floatExp` expose Ziggurat-backed normal and exponential samples—ideal for synthetic workloads or noise injection. link:https://github.com/ziglang/zig/tree/master/lib/std/Random/ziggurat.zig[ziggurat.zig] Weighted choices come from `weightedIndex`, while `.jump()` on Xoshiro engines deterministically leaps ahead by 2^128 steps to partition streams across threads without overlap. xref:29__threads-and-atomics.adoc[29] For cryptographic uses, swap to `std.crypto.random` or `std.Random.DefaultCsprng` to inherit ChaCha-based entropy rather than a fast-but-predictable PRNG. link:https://github.com/ziglang/zig/tree/master/lib/std/crypto/tlcsprng.zig[tlcsprng.zig]
+
+[[math-utilities]]
+== Practical math utilities
+
+The `std.math` namespace combines fundamental constants with measured utilities: clamps, approximate equality, and geometry helpers all share consistent semantics across CPU targets.
+
+[[math-utilities-toolkit]]
+=== Numeric hygiene toolkit
+
+Combining a handful of helpers—`sqrt`, `clamp`, approximate equality, and the golden ratio constant—keeps reporting code readable and portable. link:https://github.com/ziglang/zig/tree/master/lib/std/math/sqrt.zig[sqrt.zig]
+
+[source,zig]
+----
+include::{sourcedir}/50__random-and-math/math_inspector.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run math_inspector.zig
+----
+
+.Output
+[source,shell]
+----
+sample count -> 6
+min/max -> 0.87 / 1.11
+mean -> 0.997
+rms -> 1.000
+normalized mean -> 0.328
+72deg in rad -> 1.256637
+close to right angle? -> no
+hypot(3,4) -> 5.0
+phi constant -> 1.618033989
+----
+
+NOTE: Prefer `approxEqRel` for large-magnitude comparisons and `approxEqAbs` near zero; both honor IEEE-754 edge cases without tripping NaNs.
+
+[[math-utilities-scaling]]
+=== Tolerances, scaling, and derived quantities
+
+Angular conversions use `rad_per_deg`/`deg_per_rad`, while `hypot` preserves precision in Pythagorean calculations by avoiding catastrophic cancellation. When chaining transforms, keep intermediate results in `f64` even if your public API uses narrower floats—the mixed-type overloads in `std.math` do the right thing and avoid compiler warnings. xref:39__performance-and-inlining.adoc[39]
+
+[[hashing-integrity]]
+== Hashing: reproducibility versus integrity
+
+Zig splits hashing strategies sharply: `std.hash` families target speed and low collision rates for in-memory buckets, whereas `std.crypto.hash.sha2` delivers standardized digests for integrity checks or signature pipelines.
+
+[[hashing-integrity-noncrypto]]
+=== Non-cryptographic hashing for buckets
+
+`std.hash.Wyhash.hash` produces a 64-bit value seeded however you like, ideal for hash maps or bloom filters where avalanche properties matter more than resistance to adversaries. If you need structured hashing with compile-time type awareness, `std.hash.autoHash` walks your fields recursively and feeds them into a configurable backend. xref:44__collections-and-algorithms.adoc[44] link:https://github.com/ziglang/zig/tree/master/lib/std/hash/auto_hash.zig[auto_hash.zig]
+
+[[hashing-integrity-sha256]]
+=== SHA-256 digest pipeline with pragmatic guardrails
+
+Even when your CLI only needs a checksum, treat SHA-256 as an integrity primitive—not an authenticity guarantee—and document that difference for users.
+
+[source,zig]
+----
+include::{sourcedir}/50__random-and-math/hash_digest_tool.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run hash_digest_tool.zig -- chapters-data/code/50__random-and-math/payload.txt
+----
+
+.Output
+[source,shell]
+----
+wyhash(seed=0) payload preview -> 0x30297ecbb2bd0c02
+sha256(chapters-data/code/50__random-and-math/payload.txt) ->
+  0498ca2116fb55b7a502d0bf3ad5d0e0b3f4e23ad919bdc0f9f151ca3637a6fa
+(remember: sha256 certifies integrity, not authenticity.)
+----
+
+TIP: When hashing large files, stream through a reusable buffer and reuse a single arena allocator for argument parsing to avoid churning the general-purpose allocator. xref:10__allocators-and-memory-management.adoc[10] link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* `Random` structs are not thread-safe; split distinct generators per worker or guard access with atomics to avoid shared-state races. xref:29__threads-and-atomics.adoc[29]
+* `std.math` functions honor IEEE-754 NaN propagation—never rely on comparisons after invalid operations without explicit checks.
+* Cryptographic digests should be paired with signature checks, HMACs, or trusted distribution; SHA-256 alone detects corruption, not tampering. link:https://github.com/ziglang/zig/tree/master/lib/std/crypto/hash_composition.zig[hash_composition.zig]
+
+[[exercises]]
+== Exercises
+
+* Replace `DefaultPrng` with `std.Random.DefaultCsprng` in the first example and measure the performance delta across build modes. xref:39__performance-and-inlining.adoc[39] link:https://github.com/ziglang/zig/tree/master/lib/std/Random/ChaCha.zig[ChaCha.zig]
+* Extend `math_inspector.zig` to compute confidence intervals using `approxEqRel` to flag outliers in a latency report. xref:47__time-logging-and-progress.adoc[47]
+* Modify `hash_digest_tool.zig` to compute and store SHA-256 digests for every file inside a TAR archive from xref:49__compression-and-archives.adoc[Chapter 49], emitting a manifest alongside the archive. link:https://github.com/ziglang/zig/tree/master/lib/std/tar.zig[tar.zig]
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, alternatives, edge cases
+
+* Jump functions on Xoshiro mutate state irreversibly; snapshot your generator before calling `jump()` if you need to rewind later.
+* Avoid `bytesToHex` for streaming output on gigantic files—prefer incremental encoders to sidestep large stack allocations.
+* SHA-256 digests of enormous files (>4 GiB) must account for platform-specific path encodings; normalize UTF-8/UTF-16 earlier in your pipeline to avoid hashing different byte streams. xref:45__text-formatting-and-unicode.adoc[45]

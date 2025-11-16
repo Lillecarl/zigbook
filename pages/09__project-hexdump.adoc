@@ -1,0 +1,117 @@
+////
+changes: ["Initial draft for Project: Hexdump chapter"]
+examples_compile: yes
+keywords: ["cli", "filesystem", "formatting", "hex", "io"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "10__allocators-and-memory-management"
+open_questions: []
+previous_chapter: "08__user-types-structs-enums-unions"
+status: draft
+xref_complete: true
+////
+
+= Project: Hexdump
+:chapter-number: 9
+:chapter-slug: project-hexdump
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+This project turns raw bytes into a tidy, alignment-aware hex view. We’ll read a file incrementally, format each line as `OFFSET: HEX  ASCII`, and keep output stable across platforms. The writer interface uses buffered stdout via `std.fs.File.writer` and `std.Io.Writer`, as described in link:https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig[File.zig] and link:https://github.com/ziglang/zig/tree/master/lib/std/Io.zig[Io.zig].
+
+The formatter prints 16 bytes per line by default and can be configured with `--width N` (4..32). Bytes are grouped `8|8` to ease scanning, and non-printable ASCII becomes a dot in the right-hand gutter, as described in link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig] and link:https://ziglang.org/documentation/master/#Command-line-flags[#Command-line-flags].
+
+[[learning-goals]]
+== Learning Goals
+
+* Parse CLI flags and validate numbers with `std.fmt.parseInt`.
+* Stream a file with a fixed buffer and assemble exact-width output lines.
+* Use the non-deprecated `File.Writer` + `Io.Writer` to buffer stdout and flush cleanly.
+
+[[building]]
+== Building the Dump
+
+We’ll wire three pieces: a tiny CLI parser, a line formatter, and a loop that feeds the formatter in exact-width chunks. The implementation leans on Zig’s slices and explicit lifetimes (dup the path before freeing args) to stay robust; see link:https://github.com/ziglang/zig/tree/master/lib/std/process.zig[process.zig] and link:https://ziglang.org/documentation/master/#Error-Handling[#Error-Handling].
+
+[source,zig]
+----
+
+include::{sourcedir}/09__project-hexdump/hexdump.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run hexdump.zig -- sample.txt
+----
+
+.Output
+[source,shell]
+----
+00000000: 48 65 6C 6C 6F 2C 20 48  65 78 64 75 6D 70 21 0A   Hello, Hexdump!.
+----
+
+NOTE: The ASCII gutter replaces non-printable bytes with `.`; the newline at the end of the file shows up as `0A` and a dot on the right.
+
+[[width]]
+== Width and Grouping
+
+Pass `--width N` to change bytes per line. Grouping still splits the line in half (`N/2`) to keep the eye anchored.
+
+.Run
+[source,shell]
+----
+$ zig run hexdump.zig -- --width 8 sample.txt
+----
+
+.Output
+[source,shell]
+----
+00000000: 48 65 6C 6C  6F 2C 20 48   Hello, H
+00000008: 65 78 64 75  6D 70 21 0A   exdump!.
+----
+
+TIP: The line formatter pads both the hex and ASCII regions so that the columns align nicely on the last line, where bytes may not fill a complete width.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Avoid deprecated I/O surfaces; this example uses `File.writer` plus an `Io.Writer` buffer and calls `end()` to flush and set the final position.
+* Hex formatting is kept simple—no `-C`-style index columns beyond the offset. Extending the formatter is an easy follow-on exercise.
+* Argument lifetimes matter: duplicate the path string if you free `args` before using `cli.path`.
+
+[[exercises]]
+== Exercises
+
+* Add `--group N` to control the extra space position (currently `N = width/2`).
+* Support `--offset 0xNN` to start addresses at a base other than zero.
+* Include a right-hand hex checksum per line and a final footer (e.g., total bytes).
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Large files: the code streams in fixed-size blocks and assembles lines; adjust buffer sizes to match your I/O environment.
+* Non-ASCII encodings: the ASCII gutter is deliberately crude. For UTF-8 awareness, you’d need a more careful renderer; see link:https://github.com/ziglang/zig/tree/master/lib/std/unicode.zig[unicode.zig].
+* Binary pipes: read from `stdin` when no path is provided; adapt the open/loop accordingly if you want to support pipelines.

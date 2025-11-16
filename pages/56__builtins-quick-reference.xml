@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Appendix B. Builtins Quick Reference</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara><literal>@builtins</literal> are the compiler&#8217;s verbs; they describe how Zig thinks about types, pointers, and program structure, and they are available in every file without imports. After experimenting with compile-time programming in Part III, this appendix captures the most common builtins, their intent, and the surface-level contracts you should remember when reading or writing metaprogramming-heavy Zig. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+<simpara>The 0.15.2 release stabilized several introspection helpers (<literal>@typeInfo</literal>, <literal>@hasDecl</literal>, <literal>@field</literal>) and clarified truncation semantics for new integer sizes, making it practical to rely on the behaviors summarized here. <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Spot the difference between reflection builtins, arithmetic helpers, and control builtins when scanning a codebase.</simpara>
+</listitem>
+<listitem>
+<simpara>Combine type inspection builtins to build adapters that work with user-provided types.</simpara>
+</listitem>
+<listitem>
+<simpara>Verify the runtime behavior of numeric conversions at the edges of range and safety modes.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="core-reflection">
+<title>Core Reflection Builtins</title>
+<simpara>Reflection builtins give us structured information about user types without grabbing raw pointers or discarding safety checks. <link xl:href="15__comptime-and-reflection.xml">15</link> The example below shows how to form a documented summary of any struct, including comptime fields, optional payloads, and nested arrays.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 56__builtins-quick-reference.adoc - include::example$chapters-data/code/56__builtins-quick-reference/01_struct_introspection.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 01_struct_introspection.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Use <literal>@typeInfo</literal> plus <literal>@field</literal> inside inline loops so the compiler still optimizes away branches after specialization. <link xl:href="17__generic-apis-and-type-erasure.xml">17</link></simpara>
+</tip>
+</chapter>
+<chapter xml:id="value-extraction">
+<title>Value Extraction Helpers</title>
+<simpara>Builtins such as <literal>@field</literal>, <literal>@hasField</literal>, and <literal>@fieldParentPtr</literal> let you map runtime data back to compile-time declarations without violating Zig’s strict aliasing rules. The following snippet shows how to surface parent pointers while maintaining const-correctness. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/meta.zig">meta.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 56__builtins-quick-reference.adoc - include::example$chapters-data/code/56__builtins-quick-reference/02_parent_ptr_lookup.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 02_parent_ptr_lookup.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara><literal>@fieldParentPtr</literal> assumes the child pointer is valid and properly aligned; combine it with <literal>std.debug.assert</literal> in debug builds to catch accidental misuse early. <link xl:href="37__illegal-behavior-and-safety-modes.xml">37</link></simpara>
+</note>
+</chapter>
+<chapter xml:id="numeric-safety">
+<title>Numeric Safety Builtins</title>
+<simpara>Numeric conversions are where undefined behavior often hides; Zig makes truncation explicit via <literal>@intCast</literal>, <literal>@intFromFloat</literal>, and <literal>@truncate</literal>, which all obey safety-mode semantics. <link xl:href="37__illegal-behavior-and-safety-modes.xml">37</link> 0.15.2 refined the diagnostics these builtins emit when overflow occurs, making them reliable guards in debug builds.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 56__builtins-quick-reference.adoc - include::example$chapters-data/code/56__builtins-quick-reference/03_numeric_conversions.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 03_numeric_conversions.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 3 tests passed.</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Wrap lossy conversions in small helper functions so the intent stays readable and you can centralize assertions around shared digit logic. <link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</tip>
+</chapter>
+<chapter xml:id="comptime-control">
+<title>Comptime Control &amp; Guards</title>
+<simpara><literal>@compileError</literal>, <literal>@panic</literal>, <literal>@setEvalBranchQuota</literal>, and <literal>@inComptime</literal> give you direct control over compile-time execution; they are the safety valves that keep metaprogramming deterministic and transparent. <link xl:href="15__comptime-and-reflection.xml">15</link> The short example below guards vector widths at compile time and raises the evaluation branch quota before computing a small Fibonacci number during analysis.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 56__builtins-quick-reference.adoc - include::example$chapters-data/code/56__builtins-quick-reference/04_comptime_guards.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 04_comptime_guards.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<caution>
+<simpara><literal>@compileError</literal> stops the compilation unit immediately; use it sparingly and prefer returning an error when runtime validation is cheaper. Leave a commented-out call (as in the example) to document the failure mode without breaking the build. <link xl:href="12__config-as-data.xml">12</link></simpara>
+</caution>
+</chapter>
+<chapter xml:id="patterns">
+<title>Cross-Checking Patterns</title>
+<itemizedlist>
+<listitem>
+<simpara>Drive refactors with <literal>@hasDecl</literal> and <literal>@hasField</literal> before depending on optional features from user types; this matches the defensive style introduced in <link xl:href="17__generic-apis-and-type-erasure.xml">Chapter 17</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Combine <literal>@TypeOf</literal>, <literal>@typeInfo</literal>, and <literal>@fieldParentPtr</literal> to keep diagnostics clear in validation code—the trio makes it easy to print structural information when invariants fail.</simpara>
+</listitem>
+<listitem>
+<simpara>Remember that some builtins (like <literal>@This</literal>) depend on lexical scope; reorganizing your file can silently change their meaning, so rerun tests after every major rearrangement. <link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Builtins that interact with the allocator (<literal>@alignCast</literal>, <literal>@ptrCast</literal>) still obey Zig’s aliasing rules; rely on <literal>std.mem</literal> helpers when in doubt. <link xl:href="03__data-fundamentals.xml">3</link></simpara>
+</listitem>
+<listitem>
+<simpara><literal>@setEvalBranchQuota</literal> is global to the current compile-time execution context; keep quotas narrow to avoid masking infinite recursion. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+<listitem>
+<simpara>Some experimental builtins appear in nightly builds but not in 0.15.2—pin your tooling before adopting new names.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Build a diagnostic helper that prints the tag names of any union using <literal>@typeInfo.union</literal>. <link xl:href="17__generic-apis-and-type-erasure.xml">17</link></simpara>
+</listitem>
+<listitem>
+<simpara>Extend the numeric conversions example to emit a human-readable diff between bit patterns before and after truncation. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig">fmt.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Write a compile-time guard that rejects structs lacking a <literal>name</literal> field, then integrate it into a generic formatter pipeline. <link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Prefer higher-level std helpers when a builtin duplicates existing behavior—the standard library often wraps edge cases for you. <link xl:href="43__stdlib-index.xml">43</link></simpara>
+</listitem>
+<listitem>
+<simpara>Reflection against anonymous structs can produce compiler-generated names; cache them in your own metadata if user-facing logs need stability. <link xl:href="12__config-as-data.xml">12</link></simpara>
+</listitem>
+<listitem>
+<simpara>When interfacing with C, remember that some builtins (e.g. <literal>@ptrCast</literal>) can affect calling conventions; double-check the ABI section before deploying. <link xl:href="33__c-interop-import-export-abi.xml">33</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

@@ -1,0 +1,401 @@
+////
+changes: ["Initial draft for Errors & Resource Cleanup chapter"]
+examples_compile: yes
+keywords: ["errors", "defer", "resource-cleanup"]
+last_updated: 2025-11-02
+last_verified: 2025-11-02
+next_chapter: "05__project-tempconv-cli"
+open_questions: []
+previous_chapter: "03__data-fundamentals"
+status: reviewed
+xref_complete: true
+////
+
+= Errors & Resource Cleanup
+:chapter-number: 4
+:chapter-slug: errors-resource-cleanup
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Chapter 3 gave us the tools to shape data; now we need rigorous ways to report when operations fail and to unwind resources predictably. Zig’s error unions let you define precise failure vocabularies, propagate them with `try`, and surface informative names without reaching for exceptions, as described in link:https://ziglang.org/documentation/master/#Error-Set-Type[#Error-Set-Type] and link:https://ziglang.org/documentation/master/#try[#try].
+
+We also explore `defer` and `errdefer`, the paired statements that keep cleanup adjacent to acquisition so you never lose track of file handles, buffers, or other scarce resources when an error forces an early return; see link:https://ziglang.org/documentation/master/#defer[#defer] and link:https://ziglang.org/documentation/master/#errdefer[#errdefer].
+
+[[learning-goals]]
+== Learning Goals
+
+* Declare dedicated error sets, merge them as needed, and propagate failures with `try` so callers explicitly acknowledge what might go wrong.
+* Translate errors into recoverable states using `catch`, including logging, fallback values, and structured control-flow exits, as described in link:https://ziglang.org/documentation/master/#catch[#catch].
+* Pair `defer` and `errdefer` to guarantee deterministic cleanup, even when you intentionally silence an error with constructs like `catch unreachable`; see link:https://ziglang.org/documentation/master/#unreachable[#unreachable].
+
+[[section-1]]
+== Error Sets and Propagation
+
+Error-aware APIs in Zig embrace explicit unions: a function that might fail returns `E!T`, and each helper it calls uses `try` to bubble errors upward until a site decides how to recover. This keeps control flow observable while still letting successful paths look straightforward, as described in link:https://ziglang.org/documentation/master/#Error-Handling[#Error-Handling].
+
+[[section-1-sub-a]]
+=== Declaring Error Sets and Propagating with try
+
+By naming the exact errors a function can return, callers get compile-time exhaustiveness and readable diagnostics when values go sideways. `try` forwards those errors automatically, avoiding boilerplate while remaining honest about failure modes.
+
+[source,zig]
+----
+
+include::{sourcedir}/04__errors-resource-cleanup/propagation_basics.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run propagation_basics.zig
+----
+
+.Output
+[source,shell]
+----
+input "27" -> 27
+input "9x" failed with InvalidDigit
+input "120" failed with Overflow
+----
+
+TIP: The loop keeps moving because each `catch` branch documents its intent—report and continue—which mirrors how production code would skip a malformed record while still surfacing its name.
+
+==== How Error Sets Work Internally
+
+When you declare an error set in Zig, you are creating a subset of a global error registry maintained by the compiler. Understanding this architecture clarifies why error operations are fast and how error set merging works:
+
+[mermaid]
+....
+graph LR
+    subgraph "Global Error Set"
+        GES["global_error_set"]
+        NAMES["Error name strings<br/>Index 0 = empty"]
+
+        GES --> NAMES
+
+        NAMES --> ERR1["Index 1: 'OutOfMemory'"]
+        NAMES --> ERR2["Index 2: 'FileNotFound'"]
+        NAMES --> ERR3["Index 3: 'AccessDenied'"]
+        NAMES --> ERRN["Index N: 'CustomError'"]
+    end
+
+    subgraph "Error Value"
+        ERRVAL["Value{<br/>  err: {name: Index}<br/>}"]
+
+        ERRVAL -->|"name = 1"| ERR1
+    end
+
+    subgraph "Error Set Type"
+        ERRSET["Type{<br/>  error_set_type: {<br/>    names: [1,2,3]<br/>  }<br/>}"]
+
+        ERRSET --> ERR1
+        ERRSET --> ERR2
+        ERRSET --> ERR3
+    end
+....
+
+**Key insights:**
+
+* **Global Registry**: All error names across your entire program are stored in a single global registry with unique indices.
+* **Lightweight Values**: Error values are just `u16` tags pointing into this registry—comparing errors is as fast as comparing integers.
+* **Error Set Types**: When you write `error{InvalidDigit, Overflow}`, you are creating a type that references a subset of the global registry.
+* **Merging is Simple**: The `||` operator combines error sets by creating a new type with the union of indices—no string manipulation needed.
+* **Uniqueness Guarantee**: Error names are globally unique, so `error.InvalidDigit` always refers to the same registry entry.
+
+This design makes error handling in Zig extremely efficient while preserving informative error names for debugging. The tag-based representation means error unions add minimal overhead compared to plain values.
+
+[[section-1-sub-b]]
+=== Shaping Recovery with catch
+
+`catch` blocks can branch on specific errors, choose fallback values, or decide that a failure ends the current iteration. Labeling the loop clarifies which control path we resume after handling a timeout versus a disconnect.
+
+[source,zig]
+----
+
+include::{sourcedir}/04__errors-resource-cleanup/catch_and_recover.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run catch_and_recover.zig
+----
+
+.Output
+[source,shell]
+----
+probe 0 -> 42
+probe 1 timed out; using fallback 200
+probe 1 -> 200
+probe 2 disconnected; skipping sample
+probe 3 -> 88
+aggregate total = 330
+----
+
+TIP: Timeouts degrade to a cached number, whereas disconnects abandon the sample entirely—two distinct recovery strategies made explicit in code.
+
+[[section-1-sub-c]]
+=== Merging Error Sets into Stable APIs
+
+When reusable helpers stem from different domains—parsing, networking, storage—you can union their error sets with `||` to publish a single contract while still letting internal code `try` each step. Keeping the merged set narrow means downstream callers only reckon with the failures you actually intend to expose.
+
+==== Inferred Error Sets
+
+Often you do not need to explicitly list every error a function might return. Zig supports **inferred error sets** using the `!T` syntax, where the compiler automatically determines which errors can be returned by analyzing your function body:
+
+[mermaid]
+....
+graph TB
+    subgraph "Inferred Error Set Structure"
+        IES["InferredErrorSet"]
+        FUNC["func: Index<br/>Owning function"]
+        ERRORS["errors: NameMap<br/>Direct errors"]
+        INFERREDSETS["inferred_error_sets<br/>Dependent IES"]
+        RESOLVED["resolved: Index<br/>Final error set"]
+    end
+
+    subgraph "Error Sources"
+        DIRECTRET["return error.Foo<br/>Direct error returns"]
+        FUNCALL["foo() catch<br/>Called function errors"]
+        IESCALL["bar() catch<br/>IES function call"]
+    end
+
+    subgraph "Resolution Process"
+        BODYANAL["Analyze function body"]
+        COLLECTERRS["Collect all errors"]
+        RESOLVEDEPS["Resolve dependent IES"]
+        CREATESET["Create error set type"]
+    end
+
+    DIRECTRET --> ERRORS
+    FUNCALL --> ERRORS
+    IESCALL --> INFERREDSETS
+
+    BODYANAL --> COLLECTERRS
+    COLLECTERRS --> ERRORS
+    COLLECTERRS --> INFERREDSETS
+    RESOLVEDEPS --> CREATESET
+    CREATESET --> RESOLVED
+
+    FUNC --> BODYANAL
+    ERRORS --> COLLECTERRS
+    INFERREDSETS --> RESOLVEDEPS
+....
+
+**How it works:**
+
+1. **During Analysis**: As the compiler analyzes your function body:
+   - Each `return error.Name` adds to the direct `errors` collection
+   - Each call to a function with its own inferred error set adds a dependency to `inferred_error_sets`
+   - Calls to functions with explicit error sets add those errors to `errors`
+
+2. **After Body Analysis**: Once the function body is fully analyzed:
+   - All direct errors are collected from `errors`
+   - Dependent inferred error sets are recursively resolved
+   - A final error set type is created combining all possible errors
+   - This type is stored in `resolved` and becomes the function's error set
+
+3. **Special Cases**:
+   - Inline and comptime calls use "adhoc" inferred error sets not tied to any specific function
+   - The `!void` return type you've seen in earlier chapters uses this mechanism
+
+**Why use inferred error sets?**
+
+* **Less maintenance**: Errors propagate automatically when you add `try` calls
+* **Refactoring friendly**: Adding error-returning calls doesn't require updating signatures
+* **Still type-safe**: Callers see the complete error set through type inference
+
+When you want explicit control over your API contract, declare the error set. When internal implementation details should determine errors, use `!T` and let the compiler infer them.
+
+[[section-2]]
+== Deterministic Cleanup with defer
+
+Resource lifetime clarity comes from placing acquisition, use, and release in one lexical block. `defer` ensures releases happen in reverse order of registration, and `errdefer` supplements it for partial setup sequences that must roll back when an error interrupts progress.
+
+[[workflow-1]]
+=== defer Keeps Releases Next to Acquisition
+
+Using `defer` right after acquiring a resource documents ownership and guarantees cleanup on both success and failure, which is especially valuable for fallible jobs that may bail early.
+
+[source,zig]
+----
+
+include::{sourcedir}/04__errors-resource-cleanup/defer_cleanup.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run defer_cleanup.zig
+----
+
+.Output
+[source,shell]
+----
+-- cycle alpha --
+acquiring alpha
+working with alpha
+job alpha succeeded
+release alpha
+-- cycle beta --
+acquiring beta
+working with beta
+job beta failed
+release beta
+beta bubbled up CalibrateFailed
+----
+
+NOTE: The release call fires even on the failing job, proving that defers execute before the error reaches the caller.
+
+==== How Defer Execution Order Works
+
+Understanding the execution order of `defer` and `errdefer` statements is crucial for writing correct cleanup code. Zig executes these statements in **LIFO (Last In, First Out)** order—the reverse of their registration:
+
+[mermaid]
+....
+graph TB
+    subgraph "Function Execution"
+        ENTER["Function Entry"]
+        ACQUIRE1["Step 1: Acquire Resource A<br/>defer cleanup_A()"]
+        ACQUIRE2["Step 2: Acquire Resource B<br/>defer cleanup_B()"]
+        ACQUIRE3["Step 3: Acquire Resource C<br/>errdefer cleanup_C()"]
+        WORK["Step 4: Do work (may error)"]
+        EXIT["Function Exit"]
+    end
+    
+    subgraph "Success Path"
+        SUCCESS["Work succeeds"]
+        DEFER_C["Step 3: Run cleanup_C()"]
+        DEFER_B["Step 2: Run cleanup_B()"]
+        DEFER_A["Step 1: Run cleanup_A()"]
+        RETURN_OK["Return success"]
+    end
+    
+    subgraph "Error Path"
+        ERROR["Work errors"]
+        ERRDEFER_C["Step 3: Run cleanup_C() via errdefer"]
+        ERRDEFER_B["Step 2: Run cleanup_B() via defer"]
+        ERRDEFER_A["Step 1: Run cleanup_A() via defer"]
+        RETURN_ERR["Return error"]
+    end
+    
+    ENTER --> ACQUIRE1
+    ACQUIRE1 --> ACQUIRE2
+    ACQUIRE2 --> ACQUIRE3
+    ACQUIRE3 --> WORK
+    
+    WORK -->|"success"| SUCCESS
+    WORK -->|"error"| ERROR
+    
+    SUCCESS --> DEFER_C
+    DEFER_C --> DEFER_B
+    DEFER_B --> DEFER_A
+    DEFER_A --> RETURN_OK
+    
+    ERROR --> ERRDEFER_C
+    ERRDEFER_C --> ERRDEFER_B
+    ERRDEFER_B --> ERRDEFER_A
+    ERRDEFER_A --> RETURN_ERR
+    
+    RETURN_OK --> EXIT
+    RETURN_ERR --> EXIT
+....
+
+**Key execution rules:**
+
+* **LIFO Order**: Defers execute in reverse registration order—last registered runs first.
+* **Mirror Setup**: This naturally mirrors initialization order, so cleanup happens in reverse of acquisition.
+* **`defer` Always Runs**: Regular `defer` statements execute on both success and error paths.
+* **`errdefer` Conditional**: `errdefer` statements only execute when the scope exits via error.
+* **Scope-Based**: Defers are tied to their enclosing scope (function, block, etc.).
+
+This LIFO guarantee ensures that resources are cleaned up in the opposite order of acquisition. This is especially important when resources depend on each other, as it prevents use-after-free scenarios during cleanup.
+
+[[workflow-2]]
+=== errdefer Rolls Back Partial Initialization
+
+`errdefer` is ideal for staged setups: it runs only when the surrounding scope exits with an error, giving you a single place to undo whatever succeeded before the failure.
+
+[source,zig]
+----
+
+include::{sourcedir}/04__errors-resource-cleanup/errdefer_recovery.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run errdefer_recovery.zig
+----
+
+.Output
+[source,shell]
+----
+-- success path --
+opening "primary"
+registering "primary"
+-- register failure --
+opening "backup"
+registering "backup"
+rollback "backup"
+closing "backup"
+setup failed with RegisterFailed
+-- open failure --
+opening ""
+setup failed with OpenFailed
+deregister "primary"
+closing "primary"
+----
+
+NOTE: The staging function cleans up only the partially initialized `backup` channel, while leaving the untouched empty name alone and deferring the real teardown of the successful `primary` until the caller exits.
+
+[[section-2-sub-c]]
+=== Ignoring Errors with Intent
+
+Sometimes you decide an error is impossible—perhaps you validated input earlier—so you write `try foo() catch unreachable;` to crash immediately if the invariant is broken. Do this sparingly: in Debug and ReleaseSafe builds, `unreachable` traps so such assumptions are loudly revalidated at runtime.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Favor small, descriptive error sets so API consumers read the type and instantly grasp all the failure branches they must handle.
+* Remember that defers execute in reverse order; put the most fundamental cleanup last so shutdown mirrors setup.
+* Treat `catch unreachable` as a debugging assertion—not as a way to silence legitimate failures—because safety modes turn it into a runtime trap.
+
+[[exercises]]
+== Exercises
+
+* Extend `propagation_basics.zig` so `accumulate` accepts arbitrarily long inputs by checking for overflow before multiplying, and surface a new error variant for "too many digits."
+* Augment `catch_and_recover.zig` with a struct that records how many timeouts occurred, returning it from `main` so tests can assert the recovery policy.
+* Modify `errdefer_recovery.zig` to inject an additional configuration step guarded by its own `defer`, then observe how both `defer` and `errdefer` cooperate when initialization stops midway.
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases:
+
+* When interoperating with C, translate foreign error codes into Zig error sets once at the boundary so the rest of your code keeps the richer typing.
+* If a cleanup routine itself can fail, prefer logging within the `defer` and keep the original error primary; otherwise callers may misinterpret the cleanup failure as the root cause.
+* For deferred allocations, consider arenas or owned buffers: they integrate with `defer` by freeing everything at once, reducing the number of individual cleanup statements you need.

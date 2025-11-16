@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Process and Environment</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>After building observability with timers, logging, and progress bars in <link xl:href="47__time-logging-and-progress.xml">the previous chapter</link>, we now step into the mechanics of how Zig programs interact with their immediate operating-system context. That means enumerating command-line arguments, examining and shaping environment variables, managing working directories, and spawning child processes—all via <literal>std.process</literal> on Zig 0.15.2. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/process.zig">process.zig</link></simpara>
+<simpara>Mastering these APIs lets tools feel at home on every machine: flags parse predictably, configuration flows in cleanly, and subprocesses cooperate instead of hanging or leaking handles. In Part VI we will broaden that scope across build targets, so the patterns here form the portable baseline to build upon. <link xl:href="41__cross-compilation-and-wasm.xml">41</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Navigate <literal>std.process</literal> iterators to inspect program arguments without leaking allocations.</simpara>
+</listitem>
+<listitem>
+<simpara>Capture, clone, and modify environment maps safely using Zig’s sentinel-aware strings. <link xl:href="03__data-fundamentals.xml">3</link></simpara>
+</listitem>
+<listitem>
+<simpara>Query and update the current working directory with deterministic error handling.</simpara>
+</listitem>
+<listitem>
+<simpara>Launch child processes, harvest their output, and interpret exit conditions in a portable fashion. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/process/Child.zig">Child.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Build small utilities that respect user overrides while maintaining predictable defaults. <link xl:href="05__project-tempconv-cli.xml">5</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="process-basics">
+<title>Process Basics: Arguments, Environment, and CWD</title>
+<simpara>Zig keeps process state explicit: argument iteration, environment snapshots, and working-directory lookups all surface as functions returning slices or dedicated structs rather than hidden globals. That mirrors the data-first mindset from Part I while adding just enough OS abstraction to stay portable. <link xl:href="01__boot-basics.xml">1</link></simpara>
+<section xml:id="process-basics-args">
+<title>Command-line arguments without surprises</title>
+<simpara><literal>std.process.argsAlloc</literal> copies the null-terminated argument list into allocator-owned memory so you can safely compute lengths, take basenames, or duplicate strings. <link xl:href="05__project-tempconv-cli.xml">5</link> For lightweight scans, <literal>argsWithAllocator</literal> exposes an iterator that reuses buffers. Just remember to call <literal>deinit</literal> once you finish.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 48__process-and-environment.adoc - include::example$chapters-data/code/48__process-and-environment/args_overview.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run args_overview.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">argv[0].basename = args_overview
+argc = 1
+user args absent</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>When you hand off <literal>[:0]u8</literal> entries to other APIs, use <literal>std.mem.sliceTo(arg, 0)</literal> to strip the sentinel without copying. This preserves both allocator ownership and Unicode correctness.</simpara>
+</tip>
+</section>
+<section xml:id="process-basics-envmap">
+<title>Environment maps as explicit snapshots</title>
+<simpara>Environment variables become predictable once you work on a local <literal>EnvMap</literal> copy. The map deduplicates keys, provides case-insensitive lookups on Windows, and makes ownership rules clear. <link xl:href="28__filesystem-and-io.xml">28</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 48__process-and-environment.adoc - include::example$chapters-data/code/48__process-and-environment/env_map_playground.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run env_map_playground.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">pairs = 3
+APP_MODE = override
+THREADS present? no</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Use <literal>putMove</literal> when you already own heap-allocated strings and want the map to adopt them. It avoids extra copies and mirrors the <literal>ArrayList.put</literal> semantics covered in <link xl:href="44__collections-and-algorithms.xml">the collections chapter</link>.</simpara>
+</note>
+</section>
+<section xml:id="process-basics-cwd">
+<title>Current working directory helpers</title>
+<simpara><literal>std.process.getCwdAlloc</literal> delivers the working directory in a heap slice, while <literal>getCwd</literal> writes into a caller-supplied buffer. Choose the latter inside hot loops to avoid churn. Combine that with <literal>std.fs.cwd()</literal> from <link xl:href="28__filesystem-and-io.xml">the filesystem chapter</link> for path joins or scoped directory changes.</simpara>
+</section>
+</chapter>
+<chapter xml:id="child-processes">
+<title>Managing Child Processes</title>
+<simpara>Process orchestration centers on <literal>std.process.Child</literal>, which wraps OS-specific hazards (handle inheritance, Unicode command lines, signal races) in a consistent interface. <link xl:href="22__build-system-deep-dive.xml">22</link> You decide how each stream behaves (inherit, ignore, pipe, or close), then wait for a <literal>Term</literal> that spells out whether the child exited, signaled, or stopped.</simpara>
+<section xml:id="child-processes-capture">
+<title>Capturing stdout deterministically</title>
+<simpara>Spawning <literal>zig version</literal> makes a portable demo: we pipe stdout/stderr, collect data into <literal>ArrayList</literal> buffers, and accept only exit code zero. <link xl:href="39__performance-and-inlining.xml">39</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 48__process-and-environment.adoc - include::example$chapters-data/code/48__process-and-environment/child_process_capture.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run child_process_capture.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">zig version -&gt; 0.15.2
+stderr bytes -&gt; 0</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Always set <literal>stdin_behavior = .Ignore</literal> for fire-and-forget commands. Otherwise, the child inherits the parent&#8217;s stdin and may block on accidental reads (common with shells or REPLs).</simpara>
+</tip>
+</section>
+<section xml:id="child-processes-exits">
+<title>Exit semantics and diagnostics</title>
+<simpara><literal>Child.wait()</literal> returns a <literal>Term</literal> union. Inspect <literal>Term.Exited</literal> for numeric codes and report <literal>Term.Signal</literal> or <literal>Term.Stopped</literal> verbosely so users know when a signal intervened. Tie those diagnostics into the structured logging discipline from <link xl:href="47__time-logging-and-progress.xml">Chapter 47</link> for uniform CLI error reporting.</simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>argsWithAllocator</literal> borrows buffers. Stash any data you need beyond the iteration before calling <literal>deinit</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Environment keys are case-insensitive on Windows. Avoid storing duplicates that differ only by case. <link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara><literal>Child.spawn</literal> can still fail after <literal>fork</literal>/<literal>CreateProcess</literal>. Always call <literal>waitForSpawn</literal> implicitly via <literal>wait()</literal> before touching pipes. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Write a wrapper that prints a table of <literal>(index, argument, length)</literal> using only the iterator interface. No heap copies permitted.</simpara>
+</listitem>
+<listitem>
+<simpara>Extend the <literal>EnvMap</literal> example to merge overlay variables from a <literal>.env</literal> file while rejecting duplicates of security-critical keys (e.g., <literal>PATH</literal>). <link xl:href="28__filesystem-and-io.xml">28</link></simpara>
+</listitem>
+<listitem>
+<simpara>Build a miniature task runner that spawns three commands in sequence, piping stdout into a progress logger from <link xl:href="47__time-logging-and-progress.xml">Chapter 47</link>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>WASI without libc disables dynamic argument/environment access. Gate code with <literal>builtin.os.tag</literal> checks when targeting the browser or serverless runtimes.</simpara>
+</listitem>
+<listitem>
+<simpara>On Windows, batch files require <literal>cmd.exe</literal> quoting rules. Rely on <literal>argvToScriptCommandLineWindows</literal> rather than crafting strings manually. <link xl:href="41__cross-compilation-and-wasm.xml">41</link></simpara>
+</listitem>
+<listitem>
+<simpara>High-output children can exhaust pipes. Use <literal>collectOutput</literal> with a sensible <literal>max_output_bytes</literal>, or stream to disk to avoid <literal>StdoutStreamTooLong</literal>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

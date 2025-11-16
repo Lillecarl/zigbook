@@ -1,0 +1,123 @@
+////
+changes: ["Initial Top-K Word Frequency Analyzer project chapter for Zig 0.15.2"]
+examples_compile: yes
+keywords: ["word frequency", "StringHashMap", "sorting", "tokenization", "Timer"]
+last_updated: 2025-11-13
+last_verified: 2025-11-13
+previous_chapter: "52__debug-and-valgrind"
+next_chapter: "54__project-zip-unzip-with-progress"
+status: draft
+xref_complete: true
+open_questions: []
+////
+
+= Project: Top-K Word Frequency Analyzer
+:chapter-number: 53
+:chapter-slug: project-top-k-word-frequency-analyzer
+:creative-commons:
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+The debugging chapter introduced tools for explaining *why* a program misbehaves.xref:52__debug-and-valgrind.adoc[52] This project leans on similar discipline to build a deterministic text analytics utility: feed it a log excerpt, collect the most frequent tokens, and emit timing data for each phase. We will combine the tokenization helpers from `std.mem`, hashed collections from `std`, the `heap` sorter, and the `Timer` API to produce reproducible rankings with measured costs.link:https://github.com/ziglang/zig/tree/master/lib/std/mem.zig[mem.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/hash_map.zig[hash_map.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/sort.zig[sort.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/time.zig[time.zig]
+
+[[learning-goals]]
+== Learning Goals
+
+* Build an end-to-end I/O pipeline that reads a corpus, normalizes text, and accumulates counts with `std.StringHashMap` and `std.ArrayList`.link:https://github.com/ziglang/zig/tree/master/lib/std/array_list.zig[array_list.zig]
+* Rank frequencies deterministically using an explicit comparator that resolves ties without depending on hash map iteration order.
+* Capture per-phase timings with `std.time.Timer` to validate regressions and communicate performance expectations.
+
+[[pipeline-design]]
+== Designing the Pipeline
+
+Our analyzer accepts an optional file path and an optional `k` parameter (`top k` tokens); both default to a bundled corpus and `5`, respectively. We read the entire file into memory for simplicity, but the normalization and counting loop is written to operate linearly so it can be adapted to stream chunks later. A `GeneralPurposeAllocator` backs all dynamic structures, and an arena-friendly workflow (duplicating strings only on first sight) keeps allocations proportional to the vocabulary size.link:https://github.com/ziglang/zig/tree/master/lib/std/heap.zig[heap.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/process.zig[process.zig]
+
+Tokenization happens with `std.mem.tokenizeAny`, configured with a conservative separator set that trims whitespace, punctuation, and markup characters. Each token is lowercased in a reusable `std.ArrayList(u8)` before attempting insertion into the map; if the token already exists, only the count increments, keeping temporary allocations bounded.
+
+[[count-and-rank]]
+== Counting and Ranking
+
+The complete utility demonstrates StringHashMap, ArrayList, sorting, and timing side by side.
+
+[source,zig]
+----
+include::{sourcedir}/53__project-top-k-word-frequency-analyzer/topk_word_frequency.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run chapters-data/code/53__project-top-k-word-frequency-analyzer/topk_word_frequency.zig
+----
+
+.Output
+[source,shell]
+----
+source -> chapters-data/code/53__project-top-k-word-frequency-analyzer/sample_corpus.txt
+tokens -> 102, unique -> 86
+top 5 words:
+   1. the -> 6
+   2. a -> 3
+   3. and -> 3
+   4. are -> 2
+   5. latency -> 2
+timings (ns): read=284745, tokenize=3390822, sort=236725
+----
+
+`std.StringHashMap` stores the canonical lowercase spellings, and a separate `std.ArrayList` collects the final `(word, count)` pairs for sorting. We choose `std.sort.heap` because it is deterministic, has no allocator dependencies, and performs well on small datasets; the comparator sorts primarily by descending count and secondarily by lexical ordering to keep ties stable. This is important when rerunning analyses across runs or machines—the field team can diff resulting CSVs without surprises.
+
+[[timing-and-reproducibility]]
+== Timing and Reproducibility
+
+A single `Timer` instance measures three phases: file ingestion, tokenization, and sorting. We call `lap()` after each phase to reset the zero point while recording elapsed nanoseconds, making it easy to spot which step dominates. Because the analyzer normalizes case and uses deterministic sorting, the output for a given corpus remains identical across runs, allowing timing deltas to be attributed to hardware or toolchain changes rather than nondeterministic ordering.
+
+For regressions, rerun with a larger `k` or a different corpus:
+
+[source,shell]
+----
+$ zig run chapters-data/code/53__project-top-k-word-frequency-analyzer/topk_word_frequency.zig -- chapters-data/code/53__project-top-k-word-frequency-analyzer/sample_corpus.txt 10
+----
+
+The optional arguments let you keep the binary scriptable—drop it into CI, compare output artifacts, and alert when the timing budget changes by more than a threshold. When integrating into bigger systems, the map-building loop can be swapped to stream from `stdin` or a TCP socket while preserving the same deterministic ranking rules.link:https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig[File.zig]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* `StringHashMap` does not free stored keys automatically; this sample releases them explicitly before dropping the map to keep the general-purpose allocator leak checker happy.
+* The tokenizer is ASCII-focused. For full Unicode segmentation, pair the pipeline with `std.unicode.ScalarIterator` or integrate ICU bindings.xref:45__text-formatting-and-unicode.adoc[45]
+* Reading the entire corpus into memory simplifies the tutorial but may not suit multi-gigabyte logs. Swap `readFileAlloc` for chunked `readAll` loops or memory-mapped files when scaling.xref:28__filesystem-and-io.adoc[28]
+
+[[exercises]]
+== Exercises
+
+* Emit the report as JSON by serializing the sorted slice, then compare diff friendliness with the textual version.xref:32__project-http-json-client.adoc[32] link:https://github.com/ziglang/zig/tree/master/lib/std/json.zig[json.zig]
+* Replace the single-threaded analyzer with a two-phase pipeline: shard tokens across threads, then merge hash maps before sorting. Measure the benefit using `Timer` and summarize the scaling.xref:29__threads-and-atomics.adoc[29]
+* Add a `--stopwords` option that loads a newline-delimited ignore list, removes those tokens before counting, and reports how many candidates were filtered out.xref:36__style-and-best-practices.adoc[36]
+
+[[caveats-alternatives]]
+== Caveats, Alternatives, Edge Cases
+
+* For streaming environments, consider `std.PriorityQueue` to maintain the top `k` incrementally instead of recording the entire histogram before sorting.link:https://github.com/ziglang/zig/tree/master/lib/std/priority_queue.zig[priority_queue.zig]
+* If performance requirements outgrow heap sort, experiment with `std.sort.pdq` or bucket-based approaches while keeping the deterministic comparator contract intact.
+* To support multi-locale text, layer in normalization (NFC/NFKC) and use Unicode-aware casing helpers; the comparator may need locale-specific collation to keep results intuitive.xref:45__text-formatting-and-unicode.adoc[45]

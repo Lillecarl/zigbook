@@ -1,0 +1,376 @@
+////
+changes: ["Path and handle management walkthrough", "Streaming copy and directory walking demos"]
+examples_compile: yes
+keywords: ["std.fs", "std.io", "seek", "walk"]
+last_updated: 2025-11-05
+last_verified: 2025-11-05
+next_chapter: "29__threads-and-atomics"
+open_questions: []
+previous_chapter: "27__project-multi-package-workspace-and-vendor"
+status: draft
+xref_complete: true
+////
+
+= Filesystem & I/O
+:chapter-number: 28
+:chapter-slug: filesystem-and-io
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Workspace builds are only as useful as the data they sling around. After wiring a multi-package dashboard in Chapter 27, we now descend into the filesystem and I/O primitives that back every package install, log collector, and CLI tool you will write. See xref:27__project-multi-package-workspace-and-vendor.adoc[27]. Zig link:https://ziglang.org/download/0.15.1/release-notes.html-[v0.15.2] brings a unified `std.fs.File` surface with memoized metadata and a buffered-writer story that the changelog all but shouts about—use it, flush it, and keep handles tidy. See link:https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig[File.zig].
+
+=== The Filesystem Architecture
+
+Before diving into specific operations, it's essential to understand how Zig's filesystem APIs are structured. The following diagram shows the layered architecture from high-level `std.fs` operations down to system calls:
+
+[mermaid]
+....
+graph TB
+    subgraph "User Code"
+        APP[Application Code]
+    end
+
+    subgraph "High-Level APIs (lib/std)"
+        FS["std.fs<br/>(fs.zig)"]
+        NET["std.net<br/>(net.zig)"]
+        PROCESS["std.process<br/>(process.zig)"]
+        FMT["std.fmt<br/>(fmt.zig)"]
+        HEAP["std.heap<br/>(heap.zig)"]
+    end
+
+    subgraph "Mid-Level Abstractions"
+        POSIX["std.posix<br/>(posix.zig)<br/>Cross-platform POSIX API"]
+        OS["std.os<br/>(os.zig)<br/>OS-specific wrappers"]
+        MEM["std.mem<br/>(mem.zig)<br/>Memory utilities"]
+        DEBUG["std.debug<br/>(debug.zig)<br/>Stack traces, assertions"]
+    end
+
+    subgraph "Platform Layer"
+        LINUX["std.os.linux<br/>(os/linux.zig)<br/>Direct syscalls"]
+        WINDOWS["std.os.windows<br/>(os/windows.zig)<br/>Win32 APIs"]
+        WASI["std.os.wasi<br/>(os/wasi.zig)<br/>WASI APIs"]
+        LIBC["std.c<br/>(c.zig)<br/>C interop"]
+    end
+
+    subgraph "System Layer"
+        SYSCALL["System Calls"]
+        KERNEL["Operating System"]
+    end
+
+    APP --> FS
+    APP --> NET
+    APP --> PROCESS
+    APP --> FMT
+    APP --> HEAP
+
+    FS --> POSIX
+    NET --> POSIX
+    PROCESS --> POSIX
+    FMT --> MEM
+    HEAP --> MEM
+
+    POSIX --> OS
+    OS --> LIBC
+    OS --> LINUX
+    OS --> WINDOWS
+    OS --> WASI
+
+    DEBUG --> OS
+
+    LINUX --> SYSCALL
+    WINDOWS --> SYSCALL
+    WASI --> SYSCALL
+    LIBC --> SYSCALL
+
+    SYSCALL --> KERNEL
+....
+
+This layered design provides both portability and control. When you call `std.fs.File.read()`, the request flows through `std.posix` for cross-platform compatibility, then through `std.os` which dispatches to platform-specific implementations—either direct system calls on Linux or libc functions when `builtin.link_libc` is true. Understanding this architecture helps you reason about cross-platform behavior, debug issues by knowing which layer to inspect, and make informed decisions about linking libc. The separation of concerns means you can use high-level `std.fs` APIs for portability while still having access to lower layers when you need platform-specific features.
+
+[[learning-goals]]
+== Learning Goals
+
+* Compose platform-neutral paths, open files safely, and print via buffered writers without leaking handles. link:https://github.com/ziglang/zig/tree/master/lib/std/fs/path.zig[path.zig]
+* Stream data between files while inspecting metadata such as byte counts and stat output.
+* Walk directory trees using `Dir.walk`, filtering on extensions to build discovery and housekeeping tools. link:https://github.com/ziglang/zig/tree/master/lib/std/fs/Dir.zig[Dir.zig]
+* Apply ergonomic error handling patterns (`catch`, cleanup defers) when juggling multiple file descriptors.
+
+[[paths-and-writers]]
+== Paths, handles, and buffered stdout
+
+We start with the basics: join a platform-neutral path, create a file, write a CSV header with the buffered stdout guidance from 0.15, and read it back into memory. The example keeps allocations explicit so you can see where buffers live and when they are freed.
+
+=== Understanding std.fs Module Organization
+
+The `std.fs` namespace is organized around two primary types, each with distinct responsibilities:
+
+[mermaid]
+....
+graph TB
+    subgraph "std.fs Module"
+        FS["fs.zig<br/>cwd, max_path_bytes"]
+        DIR["fs/Dir.zig<br/>openFile, makeDir"]
+        FILE["fs/File.zig<br/>read, write, stat"]
+    end
+
+    FS --> DIR
+    FS --> FILE
+....
+
+The `fs.zig` root module provides entry points like `std.fs.cwd()` which returns a `Dir` handle representing the current working directory, plus platform constants like `max_path_bytes`. The `Dir` type (`fs/Dir.zig`) handles directory-level operations—opening files, creating subdirectories, iterating entries, and managing directory handles. The `File` type (`fs/File.zig`) provides all file-specific operations: reading, writing, seeking, and querying metadata via `stat()`. This separation keeps the API clear: use `Dir` methods to navigate the filesystem tree and `File` methods to manipulate file contents. When you call `dir.openFile()`, you get back a `File` handle that's independent of the directory—closing the directory doesn't invalidate the file handle.
+
+[source,zig]
+----
+include::{sourcedir}/28__filesystem-and-io/01_paths_and_Io.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run 01_paths_and_io.zig
+----
+
+.Output
+[source,shell]
+----
+file name: metrics.log
+directory: fs_walkthrough
+absolute path: /home/zkevm/Documents/github/zigbook-net/fs_walkthrough/metrics.log
+--- file contents ---
+timestamp,value
+2025-11-05T09:00Z,42
+2025-11-05T09:05Z,47
+----
+
+=== Platform-Specific Path Encoding
+
+Path strings in Zig use platform-specific encodings, which is important for cross-platform code:
+
+|===
+| Platform | Encoding | Notes
+
+| Windows
+| WTF-8
+| Encodes WTF-16LE in UTF-8 compatible format
+
+| WASI
+| UTF-8
+| Valid UTF-8 required
+
+| Other
+| Opaque bytes
+| No particular encoding assumed
+|===
+
+On Windows, Zig uses WTF-8 (Wobbly Transformation Format-8) to represent filesystem paths. This is a superset of UTF-8 that can encode unpaired UTF-16 surrogates, allowing Zig to handle any Windows path while still working with `[]const u8` slices. WASI targets enforce strict UTF-8 validation on all paths. On Linux, macOS, and other POSIX systems, paths are treated as opaque byte sequences with no encoding assumptions—they can contain any bytes except null terminators. This means `std.fs.path.join` works identically across platforms by operating on byte slices, while the underlying OS layer handles encoding conversions transparently. When writing cross-platform path manipulation code, stick to `std.fs.path` utilities and avoid assumptions about UTF-8 validity unless targeting WASI specifically.
+
+TIP: `readToEndAlloc` works on the current seek position; always rewind with `seekTo(0)` (or reopen) after writing if you plan to reread the same handle.
+
+[[streaming-copy]]
+== Streaming copies with positional writers
+
+File copying illustrates how `std.fs.File.read` coexists with buffered writers that honor the changelog’s “please buffer” directive. This snippet streams fixed-size chunks, flushes the destination, and fetches metadata for sanity checks.
+
+[source,zig]
+----
+include::{sourcedir}/28__filesystem-and-io/02_stream_copy.zig[]
+----
+
+
+.Run
+[source,shell]
+----
+$ zig run 02_stream_copy.zig
+----
+
+.Output
+[source,shell]
+----
+copied 17 bytes
+destination size: 17
+--- copy.txt ---
+alpha
+beta
+gamma
+----
+
+NOTE: `File.stat()` caches size and kind information on Linux, macOS, and Windows, saving an extra syscall for subsequent queries. Lean on it instead of juggling separate `fs.path` calls.
+
+[[dir-walk]]
+== Walking directory trees
+
+`Dir.walk` hands you a recursive iterator with pre-opened directories, which means you can call `statFile` on the containing handle and avoid reallocating joined paths. The following demo builds a toy log tree, emits directory and file entries, and summarizes how many `.log` files were spotted.
+
+[source,zig]
+----
+include::{sourcedir}/28__filesystem-and-io/03_dir_walk.zig[]
+----
+
+
+.Run
+[source,shell]
+----
+$ zig run 03_dir_walk.zig
+----
+
+.Output
+[source,shell]
+----
+DIR  logs
+DIR  logs/jobs
+FILE logs/jobs/batch.log (8 bytes) [log]
+DIR  logs/app
+FILE logs/app/errors.log (9 bytes) [log]
+FILE logs/app/today.log (7 bytes) [log]
+DIR  notes
+FILE notes/todo.txt (12 bytes)
+--- summary ---
+directories: 4
+files: 4
+log files: 3
+----
+
+TIP: Each `Walker.Entry` exposes both a zero-terminated `path` and the live `dir` handle. Prefer `statFile` on that handle to dodge `NameTooLong` for deeply nested trees.
+
+[[error-patterns]]
+== Error handling patterns
+
+=== How Filesystem Errors Work
+
+The filesystem API returns rich error sets—`error.AccessDenied`, `error.PathAlreadyExists`, `error.NameTooLong`, and friends—but where do these typed errors come from? The following diagram shows the error conversion flow:
+
+[mermaid]
+....
+graph TB
+    SYSCALL["System Call"]
+
+    RESULT{"Return Value"}
+
+    subgraph "Error Path"
+        ERRNO["Get errno/Win32Error"]
+        ERRCONV["Convert to Zig error"]
+        RETURN_ERR["Return error"]
+    end
+
+    subgraph "Success Path"
+        RETURN_OK["Return result"]
+    end
+
+    SYSCALL --> RESULT
+
+    RESULT -->|"< 0 or NULL"| ERRNO
+    RESULT -->|">= 0 or valid"| RETURN_OK
+
+    ERRNO --> ERRCONV
+    ERRCONV --> RETURN_ERR
+....
+
+When a filesystem operation fails, the underlying system call returns an error indicator (negative value on POSIX, `NULL` on Windows). The OS abstraction layer then retrieves the error code—`errno` on POSIX systems or `GetLastError()` on Windows—and converts it to a typed Zig error via conversion functions like `errnoFromSyscall` (Linux) or `unexpectedStatus` (Windows). This means `error.AccessDenied` is not a string or enum tag—it's a distinct error type that the compiler tracks through your call stack. The conversion is deterministic: `EACCES` (errno 13 on Linux) always becomes `error.AccessDenied`, and `ERROR_ACCESS_DENIED` (Win32 error 5) maps to the same Zig error, providing cross-platform error semantics.
+
+Use `catch |err|` sparingly to annotate expected failures (e.g. `catch |err| if (err == error.PathAlreadyExists) {}`) and pair it with `defer` for cleanup so partial successes do not leak directories or file descriptors.
+
+=== The Translation Mechanism
+
+The error conversion happens through platform-specific functions that map error codes to Zig's error types:
+
+[mermaid]
+....
+graph LR
+    SYSCALL["System Call<br/>returns error code"]
+    ERRNO["errno or NTSTATUS"]
+    CONVERT["errnoFromSyscall<br/>or unexpectedStatus"]
+    ERROR["Zig Error Union<br/>e.g., error.AccessDenied"]
+
+    SYSCALL --> ERRNO
+    ERRNO --> CONVERT
+    CONVERT --> ERROR
+....
+
+On Linux and POSIX systems, `errnoFromSyscall` in `lib/std/os/linux.zig` performs the errno-to-error mapping. On Windows, `unexpectedStatus` handles the conversion from `NTSTATUS` or Win32 error codes. This abstraction means your error handling code is portable—`catch error.AccessDenied` works identically whether you're running on Linux (catching `EACCES`), macOS (catching `EACCES`), or Windows (catching `ERROR_ACCESS_DENIED`). The conversion tables are maintained in the standard library and cover hundreds of error codes, mapping them to approximately 80 distinct Zig errors that cover common failure modes. When an unexpected error occurs, the conversion functions return `error.Unexpected`, which typically indicates a serious bug or unsupported platform state.
+
+=== Practical Error Handling Patterns
+
+* When creating throwaway directories (`makePath` + `deleteTree`), wrap deletion in `catch {}` to ignore `FileNotFound` during teardown.
+* For user-visible tools, map filesystem errors to actionable messages (e.g. "check permissions on …"). Keep the original `err` for logs.
+* If you must fall back from positional to streaming mode, switch to `File.readerStreaming`/`writerStreaming` or reopen in streaming mode once and reuse the interface.
+
+[[exercises]]
+== Exercises
+
+* Extend the copy program so the destination filename comes from `std.process.argsAlloc`, then use `std.fs.path.extension` to refuse overwriting `.log` files. xref:26__build-system-advanced-topics.adoc[26]
+* Rewrite the directory walker to emit JSON using `std.json.stringify`, practicing how to stream structured data through buffered writers. See link:https://github.com/ziglang/zig/tree/master/lib/std/json.zig[json.zig].
+* Build a “tail” utility that follows a file by combining `File.seekTo` with periodic `read` calls; add `--follow` support by retrying on `error.EndOfStream`.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* `readToEndAlloc` guards against runaway files via its `max_bytes` argument—set it thoughtfully when parsing user-controlled input.
+* On Windows, opening directories for iteration requires `OpenOptions{ .iterate = true }`; the sample code does this implicitly via `openDir` with that flag.
+* ANSI escape sequences in samples assume a color-capable terminal; wrap prints in `if (std.io.isTty())` when shipping cross-platform tools. See link:https://github.com/ziglang/zig/tree/master/lib/std/Io/tty.zig[tty.zig].
+
+=== Under the Hood: System Call Dispatch
+
+For readers curious about how filesystem operations reach the kernel, Zig's `std.posix` layer uses a compile-time decision to choose between libc and direct system calls:
+
+[mermaid]
+....
+graph TB
+    APP["posix.open(path, flags, mode)"]
+
+    USELIBC{"use_libc?"}
+
+    subgraph "libc Path"
+        COPEN["std.c.open()"]
+        LIBCOPEN["libc open()"]
+    end
+
+    subgraph "Direct Syscall Path (Linux)"
+        LINUXOPEN["std.os.linux.open()"]
+        SYSCALL["syscall3(.open, ...)"]
+        KERNEL["Linux Kernel"]
+    end
+
+    ERRCONV["errno → Zig Error"]
+
+    APP --> USELIBC
+
+    USELIBC -->|"true"| COPEN
+    USELIBC -->|"false (Linux)"| LINUXOPEN
+
+    COPEN --> LIBCOPEN
+    LINUXOPEN --> SYSCALL
+    SYSCALL --> KERNEL
+
+    LIBCOPEN --> ERRCONV
+    KERNEL --> ERRCONV
+....
+
+When `builtin.link_libc` is true, Zig routes filesystem calls through the C standard library's functions (`open`, `read`, `write`, etc.). This ensures compatibility with systems where direct syscalls aren't available or well-defined. On Linux, when libc is not linked, Zig uses direct system calls via `std.os.linux.syscall3` and friends—this eliminates libc overhead and provides a smaller binary, at the cost of depending on the Linux syscall ABI stability. The decision happens at compile time based on your build configuration, meaning there's zero runtime overhead for the dispatch. This architecture is why Zig can produce tiny, static binaries on Linux (no libc dependency) while still supporting traditional libc-based builds for maximum compatibility. When debugging filesystem issues, knowing which path your build uses helps you understand stack traces and performance characteristics.
+
+[[summary]]
+== Summary
+
+* Buffer writes, flush deliberately, and lean on `std.fs.File` helpers like `readToEndAlloc` and `stat` to reduce manual bookkeeping.
+* `Dir.walk` keeps directory handles open so your tooling can operate on basenames without rebuilding absolute paths.
+* With solid error handling and cleanup defers, these primitives form the foundation for everything from log shippers to workspace installers.

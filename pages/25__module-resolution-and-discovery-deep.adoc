@@ -1,0 +1,372 @@
+////
+changes: ["Explained module discovery pipeline and safe probing strategies", "Added compile-time import demos contrasting debug and release modes"]
+examples_compile: yes
+keywords: ["module graph", "discovery", "comptime", "safe probing"]
+last_updated: 2025-11-05
+last_verified: 2025-11-05
+next_chapter: "26__build-system-advanced-topics"
+open_questions: []
+previous_chapter: "24__zig-package-manager-deep"
+status: draft
+xref_complete: true
+////
+
+= Module Resolution & Discovery (Deep Concept)
+:chapter-number: 25
+:chapter-slug: module-resolution-and-discovery-deep
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+This chapter zooms in on what happens *after* packages register modules—how names become concrete imports, when the compiler opens files, and what hooks control discovery (see link:https://github.com/ziglang/zig/blob/master/lib/compiler/build_runner.zig[build_runner.zig]). We will model the module graph, illuminate the difference between filesystem paths and registered namespaces, and show how to guard optional helpers without scattering fragile `#ifdef`-style logic.
+
+Along the way we will explore compile-time imports, test-specific discovery, and safe probing with `@hasDecl`, reinforcing the writer API changes introduced in Zig 0.15.2 so every example doubles as a reference for correct stdout usage (see link:https://ziglang.org/download/0.15.1/release-notes.html#[v0.15.2] and link:https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig[File.zig]).
+
+[[learning-goals]]
+== Learning Goals
+
+* Trace how the build runner expands registered module names into a dependency-aware module graph. xref:24__zig-package-manager-deep.adoc[24]
+* Distinguish filesystem-relative imports from build-registered modules and predict which wins in ambiguous cases (see link:https://github.com/ziglang/zig/tree/master/lib/std/Build.zig[Build.zig] and xref:22__build-system-deep-dive.adoc[22]).
+* Recognize every mechanism that triggers module discovery: direct imports, `comptime` blocks, `test` declarations, exports, and entry-point probing (see link:https://github.com/ziglang/zig/tree/master/lib/std/start.zig[start.zig] and link:https://github.com/ziglang/zig/tree/master/lib/std/testing.zig[testing.zig]).
+* Apply compile-time guards to make optional tooling disappear from release artifacts while keeping debug builds richly instrumented (see xref:19__modules-and-imports-root-builtin-discovery.adoc[19] and link:https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig[builtin.zig]).
+* Use `@hasDecl` and related reflection helpers to detect capabilities without relying on lossy string comparisons or unchecked assumptions (see link:https://github.com/ziglang/zig/tree/master/lib/std/meta.zig[meta.zig] and xref:15__comptime-and-reflection.adoc[15]).
+* Document and test discovery policies so collaborators understand when the build graph will include extra modules. xref:13__testing-and-leak-detection.adoc[13]
+
+[[module-graph-mapping]]
+== Module Graph Mapping
+
+The compiler turns every translation unit into a struct-like namespace. Imports correspond to edges in that graph, and the build runner feeds it a list of pre-registered namespaces so modules resolve deterministically even when no file with that name exists on disk.
+
+Under the hood, these namespaces live inside the `Zcu` compilation state alongside the intern pool, files, and analysis work queues:
+
+[mermaid]
+....
+graph TB
+	ZCU["Zcu"]
+
+	subgraph "Compilation State"
+		INTERNPOOL["intern_pool: InternPool"]
+		FILES["files: MultiArrayList(File)"]
+		NAMESPACES["namespaces: MultiArrayList(Namespace)"]
+	end
+
+	subgraph "Source Tracking"
+		ASTGEN["astgen_work_queue"]
+		SEMA["sema_work_queue"]
+		CODEGEN["codegen_work_queue"]
+	end
+
+	subgraph "Threading"
+		WORKERS["comp.thread_pool"]
+		PERTHREAD["per_thread: []PerThread"]
+	end
+
+	subgraph "Symbol Management"
+		NAVS["Navigation Values (Navs)"]
+		UAVS["Unbound Anon Values (Uavs)"]
+		EXPORTS["single_exports / multi_exports"]
+	end
+
+	ZCU --> INTERNPOOL
+	ZCU --> FILES
+	ZCU --> NAMESPACES
+	ZCU --> ASTGEN
+	ZCU --> SEMA
+	ZCU --> CODEGEN
+	ZCU --> WORKERS
+	ZCU --> PERTHREAD
+	ZCU --> NAVS
+	ZCU --> UAVS
+	ZCU --> EXPORTS
+....
+
+Module resolution walks this namespace graph as it evaluates `@import` edges, using the same `Zcu` and `InternPool` machinery that powers incremental compilation and symbol resolution.
+
+[[root-std-builtin]]
+=== Root, `std`, and `builtin` namespaces
+
+The root module is whichever file the compiler treats as the entry point. From that root you can inspect yourself via `@import("root")`, reach the bundled standard library through `@import("std")`, and access compiler-provided metadata via `@import("builtin")`. The following probe prints what each namespace exposes and demonstrates that filesystem-based imports (`extras.zig`) participate in the same graph. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+
+[source,zig]
+----
+include::{sourcedir}/25__module-resolution-and-discovery-deep/01_root_namespace.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run 01_root_namespace.zig
+----
+
+.Output
+[source,shell]
+----
+root has main(): true
+root has helperSymbol(): true
+std namespace type: type
+current build mode: Debug
+extras.greet(): extras namespace discovered via file path
+----
+
+NOTE: The call to `std.fs.File.stdout().writer(&buffer)` mirrors the 0.15.2 writer API: we buffer, print, and flush to avoid truncated output while remaining allocator-free.
+
+[[name-registration]]
+=== Names registered by the build graph
+
+When you call `b.createModule` or `exe.addModule`, you register a *namespace name* (e.g. `"logging"`) and a root source file. Any `@import("logging")` in that build graph points at the registered module even if a `logging.zig` file sits next to the caller. Only when no registered namespace is found does the compiler fall back to path-based resolution relative to the importing file. This is how dependencies fetched via `build.zig.zon` expose their modules: the build script constructs the graph long before user code executes. xref:24__zig-package-manager-deep.adoc[24]
+
+The compiler enforces that a given file belongs to exactly one module. The compile-error test suite includes a case where the same file is imported both as a registered module and as a direct file path, which is rejected:
+
+[,zig]
+----
+const case = ctx.obj("file in multiple modules", b.graph.host);
+case.addDepModule("foo", "foo.zig");
+
+case.addError(
+	\\comptime {
+	\\    _ = @import("foo");
+	\\    _ = @import("foo.zig");
+	\\}
+, &[_][]const u8{
+	":1:1: error: file exists in modules 'foo' and 'root'",
+	":1:1: note: files must belong to only one module",
+	":1:1: note: file is the root of module 'foo'",
+	":3:17: note: file is imported here by the root of module 'root'",
+});
+----
+
+This demonstrates that a file can be either the root of a registered module or part of the root module via path-based import, but not both at once.
+
+[[discovery-triggers]]
+== Discovery Triggers and Timing
+
+Module discovery starts the moment an import string is known at compile time. The compiler parses the dependency graph in waves, queuing new modules as soon as an import is evaluated in a `comptime` context. xref:15__comptime-and-reflection.adoc[15]
+
+[[comptime-imports]]
+=== Imports, `comptime`, and evaluation order
+
+A `comptime` block runs during semantic analysis. If it contains `_ = @import("tooling.zig");`, the build runner resolves and parses that module immediately—even if the runtime never references it. Use explicit policies (flags, optimization modes, or build options) so such imports are predictable rather than surprising.
+
+TIP: Resist the temptation to inline string concatenation inside `@import`; Zig requires the import target to be a compile-time known string anyway, so prefer a single constant that documents intent. 
+
+[[tests-and-entries]]
+=== Tests, exports, and entry probing
+
+`test` blocks and `pub export` declarations also trigger discovery. When you run `zig test`, the compiler imports every test-bearing module, injects a synthetic main, and invokes `std.testing` harness helpers. Similarly, `std.start` inspects the root module for `main`, `_start`, and platform-specific entry points, pulling in whichever modules those declarations reference along the way. This is why even dormant test helpers must live behind `comptime` guards; otherwise they leak into production artifacts just because a `test` declaration exists. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+
+__In the Zig compiler's own build, the path from test declarations through `std.testing` to the test runner and `zig test` command looks like this:__
+
+[mermaid]
+....
+graph TB
+	subgraph "Test Declaration Layer"
+		TESTDECL["test declarations<br/>test keyword"]
+		DOCTEST["doctests<br/>named tests"]
+		ANON["anonymous tests<br/>unnamed tests"]
+
+		TESTDECL --> DOCTEST
+		TESTDECL --> ANON
+	end
+
+	subgraph "std.testing Namespace"
+		EXPECT["expect()<br/>expectEqual()<br/>expectError()"]
+		ALLOCATOR["testing.allocator<br/>leak detection"]
+		FAILING["failing_allocator<br/>OOM simulation"]
+		UTILS["expectEqualSlices()<br/>expectEqualStrings()"]
+
+		EXPECT --> ALLOCATOR
+		ALLOCATOR --> FAILING
+	end
+
+	subgraph "Test Runner"
+		RUNNER["test_runner.zig<br/>default runner"]
+		STDERR["stderr output"]
+		SUMMARY["test summary<br/>pass/fail/skip counts"]
+
+		RUNNER --> STDERR
+		RUNNER --> SUMMARY
+	end
+
+	subgraph "Execution"
+		ZIGTEST["zig test command"]
+		BUILD["test build"]
+		EXEC["execute tests"]
+		REPORT["report results"]
+
+		ZIGTEST --> BUILD
+		BUILD --> EXEC
+		EXEC --> REPORT
+	end
+
+	TESTDECL --> EXPECT
+	EXPECT --> RUNNER
+	RUNNER --> ZIGTEST
+
+	style EXPECT fill:#f9f9f9
+	style RUNNER fill:#f9f9f9
+	style TESTDECL fill:#f9f9f9
+....
+
+__This makes it clear that adding `test` declarations not only pulls in `std.testing` but also wires your modules into the test build and execution pipeline driven by `zig test`.__
+
+[[conditional-discovery]]
+== Conditional Discovery Patterns
+
+Optional tooling should not require separate branches of your repository. Instead, drive discovery from compile-time data and reflect over namespaces to decide what to activate. xref:15__comptime-and-reflection.adoc[15]
+
+[[opt-mode-gating]]
+=== Gating modules with optimization mode
+
+Optimization mode is baked into `builtin.mode`. Use it to import expensive diagnostics only when building for Debug. The example below wires in `debug_tools.zig` during Debug builds and skips it for ReleaseFast, while also demonstrating the buffered-writer pattern required in Zig 0.15.2.
+
+[source,zig]
+----
+include::{sourcedir}/25__module-resolution-and-discovery-deep/02_conditional_import.zig[]
+----
+
+.Run (Debug)
+[source,shell]
+----
+$ zig run 02_conditional_import.zig
+----
+
+.Output
+[source,shell]
+----
+build mode: Debug
+debug tooling wired at comptime
+----
+
+.Run (ReleaseFast)
+[source,shell]
+----
+$ zig run -OReleaseFast 02_conditional_import.zig
+----
+
+.Output
+[source,shell]
+----
+build mode: ReleaseFast
+no debug tooling imported
+----
+
+NOTE: Because `@import("debug_tools.zig")` sits behind a `comptime` condition, ReleaseFast binaries never even parse the helper, protecting the build from accidentally depending on debug-only globals.
+
+[[safe-probing]]
+=== Safe probing with `@hasDecl`
+
+Rather than assuming a module exports a particular function, probe it. Here we expose a `plugins` namespace that either forwards to `plugins_enabled.zig` or returns an empty struct. `@hasDecl` tells us at compile time whether the optional `install` hook exists, enabling a safe runtime branch that works in every build mode. xref:15__comptime-and-reflection.adoc[15]
+
+[source,zig]
+----
+include::{sourcedir}/25__module-resolution-and-discovery-deep/03_safe_probe.zig[]
+----
+
+.Run (Debug)
+[source,shell]
+----
+$ zig run 03_safe_probe.zig
+----
+
+.Output
+[source,shell]
+----
+plugin discovered: Diagnostics overlay instrumentation active
+----
+
+.Run (ReleaseFast)
+[source,shell]
+----
+$ zig run -OReleaseFast 03_safe_probe.zig
+----
+
+.Output
+[source,shell]
+----
+no plugin available; continuing safely
+----
+
+NOTE: Notice that we test for a declaration on the namespace type itself (`plugins.namespace`). This keeps the root module agnostic to the plugin’s internal structure and avoids stringly typed feature toggles. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+
+[[namespace-hygiene]]
+=== Namespace hygiene checklist
+
+* Document which modules the build registers and why; treat the list as part of your public API so consumers know what `@import` calls are stable. xref:22__build-system-deep-dive.adoc[22]
+* Prefer re-exporting small, typed structs over dumping entire helper modules into the root namespace; this keeps `@hasDecl` probes fast and predictable.
+* When mixing filesystem and registered imports, choose distinct names so callers never wonder which module they are getting. xref:24__zig-package-manager-deep.adoc[24]
+
+.Namespace dependency internals
+****
+Internally, the compiler tracks dependencies on entire namespaces and individual names as separate dependees. This is why adding or renaming declarations in a namespace can invalidate downstream modules even if their source files do not change:
+
+[mermaid]
+....
+graph LR
+	subgraph "Namespace Dependencies"
+		NSFULL["Full Namespace<br/>TrackedInst.Index<br/>namespace_deps"]
+		NSNAME["Namespace Name<br/>NamespaceNameKey<br/>namespace_name_deps"]
+	end
+
+	subgraph "Memoized State"
+		MEMO["Memoized Fields<br/>panic_messages, etc."]
+	end
+....
+
+Each dependee category has its own invalidation rule—for example, `namespace_deps` invalidates on any name change in a namespace, while `namespace_name_deps` tracks the existence of a specific symbol. 
+****
+
+[[operational-guidance]]
+== Operational Guidance
+
+* Include discovery tests in your CI pipeline: compile Debug and Release builds, ensuring optional tooling toggles on and off exactly once. xref:13__testing-and-leak-detection.adoc[13]
+* Use `zig build --fetch` (from Chapter 24) before running experiments so the dependency graph is fully cached and deterministic. xref:24__zig-package-manager-deep.adoc[24]
+* Avoid `comptime` imports driven by environment variables or timestamps; they break reproducibility because the dependency graph now depends on mutable host state.
+* When in doubt, print the module graph via reflection (`@typeInfo(@import("root"))`) in a dedicated debug utility so teammates can inspect the current namespace surface. xref:15__comptime-and-reflection.adoc[15]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* `std.fs.File.stdout().writer(&buffer)` is the canonical way to emit text in Zig 0.15.2; forgetting to flush will truncate output in these examples and in your own tooling.
+* Registered module names take precedence over relative files. Choose unique names for vendored code so local helpers do not accidentally shadow dependencies. xref:24__zig-package-manager-deep.adoc[24]
+* `@hasDecl` and `@hasField` operate purely at compile time; they do not inspect runtime state. Combine them with explicit policies (flags, options) to avoid misleading “feature present” banners when the hook is gated elsewhere. xref:15__comptime-and-reflection.adoc[15]
+
+[[exercises]]
+== Exercises
+
+* Extend `01_root_namespace.zig` so it iterates `@typeInfo(@import("root")).Struct.decls`, printing a sorted table of symbols along with the module each one lives in. xref:15__comptime-and-reflection.adoc[15]
+* Modify `02_conditional_import.zig` to gate the debug tools behind a build-option boolean (e.g. `-Ddev-inspect=true`) and document how the build script would plumb that option through `b.addOptions` in Chapter 22. xref:22__build-system-deep-dive.adoc[22]
+* Create a sibling module that uses `comptime { _ = @import("helper.zig"); }` only when `builtin.mode == .Debug`, then write a test that asserts the helper never compiles in ReleaseFast. xref:13__testing-and-leak-detection.adoc[13]
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, alternatives, edge cases
+
+* In multi-package workspaces, module names must remain globally unique; consider prefixing with the package name to avoid collisions when two dependencies register `@import("log")`. xref:23__project-library-and-executable-workspace.adoc[23]
+* When targeting freestanding environments without a filesystem, configure the build runner to provide synthetic modules via `b.addAnonymousModule`; path-based imports will fail otherwise.
+* Disabling `std.start` removes the automatic search for `main`; be prepared to export `_start` manually and handle argument decoding yourself. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+
+[[summary]]
+== Summary
+
+* Module resolution is deterministic: registered namespaces win, filesystem paths serve as a fallback, and every import happens at compile time.
+* Discovery triggers extend beyond plain imports—`comptime` blocks, tests, exports, and entry probing all influence which modules join the graph. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+* Compile-time guards (`builtin.mode`, build options) and reflection helpers (`@hasDecl`) let you offer rich debug tooling without contaminating release binaries. xref:15__comptime-and-reflection.adoc[15]

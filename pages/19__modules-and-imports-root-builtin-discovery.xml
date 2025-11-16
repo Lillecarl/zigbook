@@ -1,0 +1,446 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Modules &amp; Imports</title>
+<subtitle>Root/Builtin/Discovery</subtitle>
+<date>2025-11-15</date>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Chapter 18 wrapped a generic priority queue in reusable modules; now we widen the aperture to the compiler’s full module graph. We will draw clear lines between the root module, the standard library, and the special <literal>builtin</literal> namespace that surfaces compilation metadata. Along the way, we will embrace Zig 0.15.2’s I/O revamp, practice discovery of optional helpers, and preview how custom entry points hook into <literal>std.start</literal> for programs that need to bypass the default runtime prelude. For more detail, see <link xl:href="18__project-generic-priority-queue.xml">18</link>, <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/start.zig">start.zig</link>, and <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Map how root, <literal>std</literal>, and <literal>builtin</literal> interact to form the compile-time module graph and share declarations safely. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/std.zig">std.zig</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Harvest target, optimization, and build-mode metadata from <literal>builtin</literal> to steer configuration and diagnostics. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig">builtin.zig</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Gate optional helpers with <literal>@import</literal> and <literal>@hasDecl</literal>, keeping discoveries explicit while supporting policy-driven modules.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="module-graph">
+<title>Walking the module graph</title>
+<simpara>The compiler perceives every source file as a namespaced struct. When you <literal>@import</literal> a path, the returned struct exposes any <literal>pub</literal> declarations for downstream use. The root module simply corresponds to your top-level file; anything it exports is immediately reachable through <literal>@import("root")</literal>, whether the caller is another module or a test block. We will inspect that relationship with a small constellation of files to show value sharing across modules while capturing build metadata. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig">File.zig</link>.</simpara>
+<section xml:id="module-graph-example">
+<title>Sharing root exports across helper modules</title>
+<simpara><literal>module_graph_report.zig</literal> instantiates a queue-like report across three files: the root exports a <literal>Features</literal> array, a <literal>build_config.zig</literal> helper formats metadata, and a <literal>service/metrics.zig</literal> module consumes the root exports to build a catalog. The example also demonstrates the new writer API introduced in 0.15.2, where we borrow a stack buffer and flush through the <literal>std.fs.File.stdout().writer</literal> interface. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io.zig">Io.zig</link>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 19__modules-and-imports-root-builtin-discovery.adoc - include::example$chapters-data/code/19__modules-and-imports-root-builtin-discovery/module_graph_report.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run module_graph_report.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">== Module graph walkthrough ==
+root.Version -&gt; 1.4.0
+mode=Debug target=x86_64-linux
+features: root-module-export builtin-introspection module-catalogue
+Features exported by root (3):
+   1. root-module-export
+   2. builtin-introspection
+   3. module-catalogue</programlisting>
+</para>
+</formalpara>
+<simpara>The helper modules reference <literal>@import("root")</literal> to read <literal>Features</literal>, and they format <literal>builtin.target</literal> information to prove the metadata flows correctly. Treat this pattern as your baseline for sharing config without reaching for globals or singleton state.</simpara>
+</section>
+<section xml:id="module-graph-import-tracking">
+<title>How <literal>@import</literal> calls are tracked internally</title>
+<simpara>At the compiler level, each <literal>@import("path")</literal> expression becomes an entry in an imports map during AST-to-ZIR lowering. This map deduplicates paths, preserves token locations for diagnostics, and ultimately feeds a packed <literal>Imports</literal> payload in the ZIR extra data.</simpara>
+<literallayout class="monospaced">graph TB
+   ImportExpr["@import(&amp;quot;path&amp;quot;)"] --&gt; CheckImports["Check imports map"]
+
+   CheckImports --&gt;|Exists| UseExisting["Reuse existing import"]
+   CheckImports --&gt;|Not exists| AddImport["Add to imports map"]
+
+   AddImport --&gt; StoreToken["Map string_index -&gt; token"]
+   StoreToken --&gt; GenerateInst["Generate import instruction"]
+
+   GenerateInst --&gt; Finalize["At end of AstGen"]
+   Finalize --&gt; StoreImports["Store Imports payload&lt;br/&gt;in extra array"]</literallayout>
+</section>
+</chapter>
+<chapter xml:id="builtin-metadata">
+<title>Inspecting build metadata via <literal>builtin</literal></title>
+<simpara>The <literal>builtin</literal> namespace is assembled by the compiler for every translation unit. It exposes fields such as <literal>mode</literal>, <literal>target</literal>, <literal>single_threaded</literal>, and <literal>link_libc</literal>, allowing you to tailor diagnostics or guard costly features behind compile-time switches. The next example exercises these fields and shows how to keep optional imports quarantined behind <literal>comptime</literal> checks so they never trigger in release builds.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 19__modules-and-imports-root-builtin-discovery.adoc - include::example$chapters-data/code/19__modules-and-imports-root-builtin-discovery/builtin_probe.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run builtin_probe.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">zig version (compiler): 0.15.2
+optimize mode: Debug — debug symbols and runtime safety checks enabled
+target triple: x86_64-linux-gnu
+single-threaded build: false
+linking libc: false</programlisting>
+</para>
+</formalpara>
+<simpara>Key takeaways:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.fs.File.stdout().writer(&amp;buffer)</literal> supplies a buffered writer compatible with the new <literal>std.Io.Writer</literal> API; always flush before exit to avoid truncated output.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>builtin.is_test</literal> is a comptime constant. Gating <literal>@import("test_helpers.zig")</literal> behind that flag ensures test-only helpers disappear from release builds while keeping coverage instrumentation centralized.</simpara>
+</listitem>
+<listitem>
+<simpara>Using <literal>@tagName</literal> on enum-like fields (<literal>mode</literal>, <literal>target.cpu.arch</literal>) yields strings without heap allocation, making them ideal for banner messages or feature toggles.</simpara>
+</listitem>
+</itemizedlist>
+<section xml:id="builtin-optimization-modes">
+<title>Optimization modes in practice</title>
+<simpara>The <literal>builtin.mode</literal> field observed in the probe corresponds to the optimizer configuration for the current module. Each mode trades off safety checks, debug information, speed, and binary size; understanding these trade-offs helps you decide when to enable discovery hooks or expensive diagnostics.</simpara>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="6">
+<colspec colname="col_1" colwidth="16.6666*"/>
+<colspec colname="col_2" colwidth="16.6666*"/>
+<colspec colname="col_3" colwidth="16.6666*"/>
+<colspec colname="col_4" colwidth="16.6666*"/>
+<colspec colname="col_5" colwidth="16.6666*"/>
+<colspec colname="col_6" colwidth="16.667*"/>
+<thead>
+<row>
+<entry align="left" valign="top">Mode</entry>
+<entry align="left" valign="top">Priority</entry>
+<entry align="left" valign="top">Safety Checks</entry>
+<entry align="left" valign="top">Speed</entry>
+<entry align="left" valign="top">Binary Size</entry>
+<entry align="left" valign="top">Use Case</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara><literal>Debug</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Safety + Debug Info</simpara></entry>
+<entry align="left" valign="top"><simpara>All enabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Slowest</simpara></entry>
+<entry align="left" valign="top"><simpara>Largest</simpara></entry>
+<entry align="left" valign="top"><simpara>Development and debugging</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>ReleaseSafe</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Speed + Safety</simpara></entry>
+<entry align="left" valign="top"><simpara>All enabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Fast</simpara></entry>
+<entry align="left" valign="top"><simpara>Large</simpara></entry>
+<entry align="left" valign="top"><simpara>Production with safety</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>ReleaseFast</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Maximum Speed</simpara></entry>
+<entry align="left" valign="top"><simpara>Disabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Fastest</simpara></entry>
+<entry align="left" valign="top"><simpara>Medium</simpara></entry>
+<entry align="left" valign="top"><simpara>Performance-critical production</simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara><literal>ReleaseSmall</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>Minimum Size</simpara></entry>
+<entry align="left" valign="top"><simpara>Disabled</simpara></entry>
+<entry align="left" valign="top"><simpara>Fast</simpara></entry>
+<entry align="left" valign="top"><simpara>Smallest</simpara></entry>
+<entry align="left" valign="top"><simpara>Embedded systems, size-constrained</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+<simpara>The optimization mode is specified per-module and affects:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Runtime safety checks (overflow, bounds checking, null checks)</simpara>
+</listitem>
+<listitem>
+<simpara>Stack traces and debug information generation</simpara>
+</listitem>
+<listitem>
+<simpara>LLVM optimization level (when using LLVM backend)</simpara>
+</listitem>
+<listitem>
+<simpara>Inlining heuristics and code generation strategies</simpara>
+</listitem>
+</itemizedlist>
+<literallayout class="monospaced">graph TB
+   subgraph "Optimization Mode Effects"
+      OptMode["optimize_mode: OptimizeMode"]
+
+      OptMode --&gt; SafetyChecks["Runtime Safety Checks"]
+      OptMode --&gt; DebugInfo["Debug Information"]
+      OptMode --&gt; CodegenStrategy["Codegen Strategy"]
+      OptMode --&gt; LLVMOpt["LLVM Optimization Level"]
+
+      SafetyChecks --&gt; Overflow["Integer overflow checks"]
+      SafetyChecks --&gt; Bounds["Bounds checking"]
+      SafetyChecks --&gt; Null["Null pointer checks"]
+      SafetyChecks --&gt; Unreachable["Unreachable assertions"]
+
+      DebugInfo --&gt; StackTraces["Stack traces"]
+      DebugInfo --&gt; DWARF["DWARF debug info"]
+      DebugInfo --&gt; LineInfo["Source line information"]
+
+      CodegenStrategy --&gt; Inlining["Inline heuristics"]
+      CodegenStrategy --&gt; Unrolling["Loop unrolling"]
+      CodegenStrategy --&gt; Vectorization["SIMD vectorization"]
+
+      LLVMOpt --&gt; O0["Debug: -O0"]
+      LLVMOpt --&gt; O2Safe["ReleaseSafe: -O2 + safety"]
+      LLVMOpt --&gt; O3["ReleaseFast: -O3"]
+      LLVMOpt --&gt; Oz["ReleaseSmall: -Oz"]
+   end</literallayout>
+</section>
+<section xml:id="builtin-test-config">
+<title>Case study: <literal>builtin</literal>-driven test configuration</title>
+<simpara>The standard library&#8217;s test framework uses <literal>builtin</literal> fields extensively to decide when to skip tests for unsupported backends, platforms, or optimization modes. The flow below mirrors the conditional patterns you can adopt in your own modules when wiring optional helpers.</simpara>
+<literallayout class="monospaced">graph TB
+
+   subgraph "Conditional Execution"
+      BACKEND_CHECK["Backend Check&lt;br/&gt;if (builtin.zig_backend == .stage2_X)&lt;br/&gt;return error.SkipZigTest;"]
+      PLATFORM_CHECK["Platform Check&lt;br/&gt;if (builtin.os.tag == .X)&lt;br/&gt;return error.SkipZigTest;"]
+      MODE_CHECK["Mode Check&lt;br/&gt;if (builtin.mode == .ReleaseFast)&lt;br/&gt;return error.SkipZigTest;"]
+   end
+
+   subgraph "Test Types"
+      RUNTIME["Runtime Test&lt;br/&gt;var x = computeValue();"]
+      COMPTIME["Comptime Test&lt;br/&gt;try comptime testFunction();"]
+      MIXED["Mixed Test&lt;br/&gt;try testFn();&lt;br/&gt;try comptime testFn();"]
+   end
+
+   BODY --&gt; BACKEND_CHECK
+   BODY --&gt; PLATFORM_CHECK
+   BODY --&gt; MODE_CHECK
+   BODY --&gt; RUNTIME
+   BODY --&gt; COMPTIME
+   BODY --&gt; MIXED</literallayout>
+</section>
+</chapter>
+<chapter xml:id="optional-discovery">
+<title>Optional discovery with <literal>@import</literal> and <literal>@hasDecl</literal></title>
+<simpara>Large systems frequently ship debug-only tooling or experimental adapters. Rather than silently probing the filesystem, Zig encourages explicit discovery: import the helper module at comptime when a policy is enabled, then interrogate its exported API with <literal>@hasDecl</literal>. The following sample does just that by conditionally wiring <literal>tools/dev_probe.zig</literal> into the build when running in Debug mode.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 19__modules-and-imports-root-builtin-discovery.adoc - include::example$chapters-data/code/19__modules-and-imports-root-builtin-discovery/discovery_probe.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run discovery_probe.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">discovery mode: Debug
+dev hooks: debug-only instrumentation active
+built with zig 0.15.2</programlisting>
+</para>
+</formalpara>
+<simpara>Because <literal>DevHooks</literal> is itself a comptime <literal>if</literal>, Release builds replace the import with a stub struct whose API documents the absence of dev features. Combined with <literal>@hasDecl</literal>, the root module can emit a summary without enumerating every optional hook manually, keeping compile-time discovery explicit and reproducible.</simpara>
+</chapter>
+<chapter xml:id="entrypoints">
+<title>Entry points and <literal>std.start</literal></title>
+<simpara><literal>std.start</literal> inspects the root module to decide whether to export <literal>main</literal>, <literal>_start</literal>, or platform-specific entry symbols. If you provide <literal>pub fn _start() noreturn</literal>, the default start shim stands aside, letting you wire syscalls or a bespoke runtime manually.</simpara>
+<section xml:id="entrypoints-symbol-table">
+<title>Entry point symbol table</title>
+<simpara>The exported symbol chosen by <literal>std.start</literal> depends on the platform, link mode, and configuration flags such as <literal>link_libc</literal>. The table below summarizes the most important combinations.</simpara>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="5">
+<colspec colname="col_1" colwidth="20*"/>
+<colspec colname="col_2" colwidth="20*"/>
+<colspec colname="col_3" colwidth="20*"/>
+<colspec colname="col_4" colwidth="20*"/>
+<colspec colname="col_5" colwidth="20*"/>
+<thead>
+<row>
+<entry align="left" valign="top">Platform</entry>
+<entry align="left" valign="top">Link Mode</entry>
+<entry align="left" valign="top">Conditions</entry>
+<entry align="left" valign="top">Exported Symbol</entry>
+<entry align="left" valign="top">Handler Function</entry>
+</row>
+</thead>
+<tbody>
+<row>
+<entry align="left" valign="top"><simpara>POSIX/Linux</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>POSIX/Linux</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Linking libc</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>main</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>main()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>Windows</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wWinMainCRTStartup</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>WinStartup()</literal> / <literal>wWinMainCRTStartup()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>Windows</simpara></entry>
+<entry align="left" valign="top"><simpara>Dynamic Library</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_DllMainCRTStartup</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_DllMainCRTStartup()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>UEFI</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>EfiMain</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>EfiMain()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WASI</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable (command)</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wasi_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WASI</simpara></entry>
+<entry align="left" valign="top"><simpara>Executable (reactor)</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_initialize</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wasi_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WebAssembly</simpara></entry>
+<entry align="left" valign="top"><simpara>Freestanding</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>_start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>wasm_freestanding_start()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>WebAssembly</simpara></entry>
+<entry align="left" valign="top"><simpara>Linking libc</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>__main_argc_argv</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>mainWithoutEnv()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>OpenCL/Vulkan</simpara></entry>
+<entry align="left" valign="top"><simpara>Kernel</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>main</literal></simpara></entry>
+<entry align="left" valign="top"><simpara><literal>spirvMain2()</literal></simpara></entry>
+</row>
+<row>
+<entry align="left" valign="top"><simpara>MIPS</simpara></entry>
+<entry align="left" valign="top"><simpara>Any</simpara></entry>
+<entry align="left" valign="top"><simpara>Default</simpara></entry>
+<entry align="left" valign="top"><simpara><literal>__start</literal></simpara></entry>
+<entry align="left" valign="top"><simpara>(same as <literal>_start</literal>)</simpara></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+</section>
+<section xml:id="entrypoints-logic">
+<title>Compile-time entry point logic</title>
+<simpara>Internally, <literal>std.start</literal> uses <literal>builtin</literal> fields such as <literal>output_mode</literal>, <literal>os</literal>, <literal>link_libc</literal>, and the target architecture to decide which symbol to export. The compile-time flow mirrors the cases in the symbol table.</simpara>
+<literallayout class="monospaced">graph TB
+   Start["comptime block&lt;br/&gt;(start.zig:28)"]
+   CheckMode["Check builtin.output_mode"]
+   CheckSimplified["simplified_logic?&lt;br/&gt;(stage2 backends)"]
+
+   CheckLinkC["link_libc or&lt;br/&gt;object_format == .c?"]
+   CheckWindows["builtin.os == .windows?"]
+   CheckUEFI["builtin.os == .uefi?"]
+   CheckWASI["builtin.os == .wasi?"]
+   CheckWasm["arch.isWasm() &amp;&amp;&lt;br/&gt;os == .freestanding?"]
+
+   ExportMain["@export(&amp;main, 'main')"]
+   ExportWinMain["@export(&amp;WinStartup,&lt;br/&gt;'wWinMainCRTStartup')"]
+   ExportStart["@export(&amp;_start, '_start')"]
+   ExportEfi["@export(&amp;EfiMain, 'EfiMain')"]
+   ExportWasi["@export(&amp;wasi_start,&lt;br/&gt;wasm_start_sym)"]
+   ExportWasmStart["@export(&amp;wasm_freestanding_start,&lt;br/&gt;'_start')"]
+
+   Start --&gt; CheckMode
+   CheckMode --&gt;|".Exe or has main"| CheckSimplified
+   CheckSimplified --&gt;|"true"| Simple["Simplified logic&lt;br/&gt;(lines 33-51)"]
+   CheckSimplified --&gt;|"false"| CheckLinkC
+
+   CheckLinkC --&gt;|"yes"| ExportMain
+   CheckLinkC --&gt;|"no"| CheckWindows
+   CheckWindows --&gt;|"yes"| ExportWinMain
+   CheckWindows --&gt;|"no"| CheckUEFI
+   CheckUEFI --&gt;|"yes"| ExportEfi
+   CheckUEFI --&gt;|"no"| CheckWASI
+   CheckWASI --&gt;|"yes"| ExportWasi
+   CheckWASI --&gt;|"no"| CheckWasm
+   CheckWasm --&gt;|"yes"| ExportWasmStart
+   CheckWasm --&gt;|"no"| ExportStart</literallayout>
+<simpara><literal>std.start</literal> inspects the root module to decide whether to export <literal>main</literal>, <literal>_start</literal>, or platform-specific entry symbols. If you provide <literal>pub fn _start() noreturn</literal>, the default start shim stands aside, letting you wire syscalls or a bespoke runtime manually. To keep the toolchain happy:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Build with <literal>-fno-entry</literal> so the linker does not expect the C runtime’s <literal>main</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Emit diagnostics via syscalls or lightweight wrappers; the standard I/O stack assumes <literal>std.start</literal> performed its initialization. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/os/linux.zig">linux.zig</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Optionally wrap the low-level entry point with a thin compat shim that calls into a higher-level Zig function so your business logic still lives in ergonomically testable code.</simpara>
+</listitem>
+</itemizedlist>
+<simpara>In the next chapter we will generalize these ideas into a vocabulary for differentiating modules, programs, packages, and libraries, preparing us to scale compile-time configuration without muddling namespace boundaries. <link xl:href="20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml">20</link></simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Prefer <literal>@import("root")</literal> over global singletons when sharing configuration structs; it keeps dependencies explicit and plays nicely with Zig’s compile-time evaluation.</simpara>
+</listitem>
+<listitem>
+<simpara>The 0.15.2 writer API requires explicit buffers; adjust buffer sizes to match your output volume and always flush before returning.</simpara>
+</listitem>
+<listitem>
+<simpara>Optional imports should live behind policy-enforcing declarations so production artifacts do not accidentally drag dev-only code into release builds.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>module_graph_report.zig</literal> so the <literal>Features</literal> array becomes a struct of structs, then update the catalog printer to format nested capabilities with indentation. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+<listitem>
+<simpara>Modify <literal>builtin_probe.zig</literal> to emit a JSON fragment describing the target; use <literal>std.json.stringify</literal> and verify the output under each optimization mode. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/json.zig">json.zig</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Add a ReleaseFast-only helper module for <literal>discovery_probe.zig</literal> that tracks build timestamps; guard it with <literal>if (builtin.mode == .ReleaseFast)</literal> and prove via tests that ReleaseSafe builds never import it. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>When combining <literal>@import("root")</literal> with <literal>@This()</literal> from inside the same file, beware of circular references; forward declarations or intermediate helper structs can break the cycle.</simpara>
+</listitem>
+<listitem>
+<simpara>On cross-compilation targets where <literal>std.fs.File.stdout()</literal> may not exist (e.g. freestanding WASM), fall back to target-specific writers or telemetry buffers before flushing. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/os/wasi.zig">wasi.zig</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>If you disable <literal>std.start</literal>, you also opt out of Zig’s automatic panic handler and argument parsing helpers; reintroduce equivalents explicitly or document the new contract for consumers.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

@@ -1,0 +1,135 @@
+////
+changes: ["Added HTTP JSON client project", "Documented typed decoding of API responses"]
+examples_compile: yes
+keywords: ["http", "json", "client"]
+last_updated: 2025-11-05
+last_verified: 2025-11-05
+next_chapter: "33__c-interop-import-export-abi"
+open_questions: []
+previous_chapter: "31__networking-http-and-json"
+status: draft
+xref_complete: true
+////
+
+= Project: HTTP JSON Client
+:chapter-number: 32
+:chapter-slug: project-http-json-client
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+This project chapter extends the networking primitives from xref:31__networking-http-and-json.adoc[31] into a self-contained client that polls a service, parses JSON, and prints a health report. Whereas the prior chapter focused on raw socket handshakes and minimal HTTP examples, this one combines `std.http.Client.fetch`, `std.json.parseFromSlice`, and formatted terminal output to build a user-facing workflow (see link:https://github.com/ziglang/zig/tree/master/lib/std/http/Client.zig[Client.zig] and link:https://github.com/ziglang/zig/tree/master/lib/std/json/static.zig[static.zig]).
+
+The example intentionally stands up a local server inside the same process so the client can run offline and under test. That fixture makes it easy to iterate on request framing and parsing logic while using the safer Reader and Writer APIs introduced in Zig 0.15.2 (see link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]).
+
+[[learning-goals]]
+== Learning Goals
+
+* Launch a lightweight HTTP fixture with `std.net.Address.listen` and coordinate readiness with `std.Thread.ResetEvent`.
+* Capture and decode a JSON payload into typed Zig structs and tagged unions by layering a wire representation over `std.json.parseFromSlice`.
+* Present the results in a table, using the modern Writer API to manage buffers explicitly and highlight impacted services.
+
+Each goal builds directly on the client primitives introduced in the previous chapter and the HTTP components provided in Zig's standard library (see xref:31__networking-http-and-json.adoc[31] and link:https://github.com/ziglang/zig/tree/master/lib/std/http/Server.zig[Server.zig]).
+
+[[project-architecture]]
+== Project architecture
+
+We structure the program into three pieces: a local HTTP server that exposes a status endpoint, a decoding layer that models the response as typed data, and a presentation layer that prints a concise summary. This mirrors the "fetch → parse → report" workflow mentioned in the content plan while keeping the entire project inside a single Zig executable. link:00__content_plan.adoc[link]
+
+[[local-fixture]]
+=== Local service fixture
+
+The fixture thread binds to `127.0.0.1`, accepts a single client, and answers `GET /api/status` with a canned JSON document. It reuses the `std.http.Server` adapter from the previous chapter, so all TCP details remain within the standard library, and the rest of the program can treat the service as though it were running elsewhere (see link:https://github.com/ziglang/zig/tree/master/lib/std/net.zig[net.zig]).
+
+[[typed-decoding]]
+=== Typed decoding strategy
+
+The JSON document uses optional fields to describe different incident types, so the program first parses it into a "wire" struct that mirrors those optional fields, then promotes the data into a Zig `union(enum)` based on the `kind` property. This pattern keeps `std.json` parsing straightforward while still yielding an ergonomic domain model for downstream logic (see link:https://github.com/ziglang/zig/tree/master/lib/std/meta.zig[meta.zig]).
+
+[[fetch-decode-present]]
+== Fetch, decode, and present
+
+The full program below wires the fixture, decoder, and renderer together. It can be run directly with `zig run`, and it prints a service table followed by any active incidents.
+
+[source,zig]
+----
+include::{sourcedir}/32__project-http-json-client/main.zig[]
+----
+
+This program relies on the modern Reader/Writer APIs and the HTTP client components introduced in Zig 0.15.2 (see link:https://github.com/ziglang/zig/tree/master/lib/std/Io/Writer.zig[Writer.zig]).
+
+.Run
+[source,shell]
+----
+$ zig run main.zig
+----
+
+.Output
+[source,shell]
+----
+Fetching http://127.0.0.1:46211/api/status...
+Parsed 2 regions.
+
+SERVICE SUMMARY
+Region        Service        State       Latency (ms)
+-----------------------------------------------------
+us-east      auth          up              2.7
+us-east      billing       degraded      184.0
+us-east      search        up              5.1
+eu-central   auth          up              3.1
+eu-central   billing       outage          0.0
+
+ACTIVE INCIDENTS
+- us-east: maintenance window starts 2025-11-06T01:00Z, 45 min
+- eu-central: outage since 2025-11-05T08:12Z (severity: critical)
+----
+
+NOTE: Your port number will change each run because the server listens on `0` and lets the OS choose a free socket. The client constructs the URL dynamically from `server.listen_address.in.getPort()`.
+
+[[walkthrough]]
+=== Walkthrough
+
+1. *Server bootstrap.* `serveStatus` spins up `std.http.Server` on an accepted TCP stream, compares the request target, and responds with JSON or a 404. The summary payload lives in a multiline string, but you could just as easily emit it through `std.json.Stringify`.
+2. *Wire decoding and promotion.* After fetching, the client parses it into `SummaryWire`, a structure of slices and optionals that reflect the JSON shape. `buildSummary` then allocates typed slices inside an arena and maps incident `kind` strings to union variants. Both the arena and fixed writer leverage the post-Writergate I/O APIs to control allocation explicitly.
+3. *Rendering.* `renderSummary` prints the service table via `Writer.print` and iterates incidents, surfacing severity and scheduling details for each region.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* `std.http.Client.fetch` buffers the entire response into the fixed writer; for larger payloads, swap in an arena-backed builder or stream tokens with `std.json.Scanner` (see link:https://github.com/ziglang/zig/tree/master/lib/std/json/Scanner.zig[Scanner.zig]).
+* The decoding logic assumes incident objects include the fields required for their `kind`. Validation failures bubble out as `error.MissingField`; adjust the error handling to downgrade or log if you expect partially populated data.
+* The arena allocator keeps all decoded slices alive for the lifetime of the report. If you need long-lived ownership, replace the arena with a longer-lived allocator and free slices manually when the report expires. link:https://github.com/ziglang/zig/tree/master/lib/std/heap/arena_allocator.zig[arena_allocator.zig]
+
+[[exercises]]
+== Exercises
+
+* Add a `--region` flag that filters the printed table to a specific region. Reuse the argument-parsing patterns from earlier CLI chapters before the networking section (see xref:05__project-tempconv-cli.adoc[05]).
+* Extend the JSON payload with historical latency percentiles and draw a textual sparkline or a min/median/max summary. Consult `std.fmt` for formatting helpers (see link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig]).
+* Replace the canned data with a live endpoint of your choosing, but wrap it with a timeout and fall back to the fixture to keep tests deterministic.
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, alternatives, edge cases
+
+* If the response grows beyond the `response_buffer` size, `client.fetch` reports `error.WriteFailed`. Handle that case by retrying with a heap-backed writer or by streaming the body to disk.
+* For union promotion, consider storing the original `SummaryWire` alongside your typed data so you can expose raw JSON fields in diagnostics without re-parsing.
+* In production code, you may want to reuse a single `std.http.Client` across multiple fetches; this example drops it after one request, but the API exposes a connection pool ready for reuse.

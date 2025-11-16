@@ -1,0 +1,373 @@
+////
+changes: ["Initial draft for User Types: Structs, Enums, Unions"]
+examples_compile: yes
+keywords: ["structs", "enums", "unions", "layout", "namespaces"]
+last_updated: 2025-11-02
+last_verified: 2025-11-02
+next_chapter: "09__project-hexdump"
+open_questions: []
+previous_chapter: "07__project-safe-file-copier"
+status: draft
+xref_complete: true
+////
+
+= User Types: Structs, Enums, Unions
+:chapter-number: 8
+:chapter-slug: user-types-structs-enums-unions
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Zig's user-defined types are deliberately small, sharp tools. Structs compose data and behavior under a clean namespace, enums encode closed sets of states with explicit integer representations, and unions model variant data—tagged for safety or untagged for low-level control. Together, these form the backbone of ergonomic APIs and memory-aware systems code; see link:https://ziglang.org/documentation/master/#Structs[#Structs], link:https://ziglang.org/documentation/master/#Enums[#Enums], and link:https://ziglang.org/documentation/master/#Unions[#Unions] for reference.
+
+This chapter builds pragmatic fluency: methods and defaults on structs, enum round-trips with `@intFromEnum`/`@enumFromInt`, and both tagged and untagged unions. We'll also peek at layout modifiers (`packed`, `extern`) and anonymous structs/tuples, which become handy for lightweight return values and FFI. See link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig] and link:https://github.com/ziglang/zig/tree/master/lib/std/math.zig[math.zig] for related helpers.
+
+[[learning-goals]]
+== Learning Goals
+
+* Define and use structs with methods, defaults, and clear namespacing.
+* Convert enums to and from integers safely and match on them exhaustively.
+* Choose between tagged and untagged unions; understand when `packed`/`extern` layout matters (see link:https://ziglang.org/documentation/master/#packed-struct[#packed struct] and link:https://ziglang.org/documentation/master/#extern-struct[#extern struct]).
+
+[[structs]]
+== Structs: Data + Namespace
+
+Structs gather fields and related helper functions. Methods are just functions with an explicit receiver parameter—no magic, which keeps call sites obvious and unit-testable. Defaults reduce boilerplate for common cases.
+
+[source,zig]
+----
+
+include::{sourcedir}/08__user-types-structs-enums-unions/struct_basics.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run struct_basics.zig
+----
+
+.Output
+[source,shell]
+----
+p=(3,0) len=3.000
+p=(0,4) len=4.000
+----
+
+TIP: Methods are namespaced functions; you can freely mix free functions and methods depending on testability and API clarity.
+
+[[enums]]
+== Enums: States with Bit-Exact Reprs
+
+Enums can set their integer representation (e.g., `enum(u8)`) and convert to/from integers with builtins. A `switch` over an enum must be exhaustive unless you include `else`, which is perfect for catching new states at compile time.
+
+[source,zig]
+----
+
+include::{sourcedir}/08__user-types-structs-enums-unions/enum_roundtrip.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run enum_roundtrip.zig
+----
+
+.Output
+[source,shell]
+----
+m=busy int=1
+m2=paused int=2
+----
+
+NOTE: `@enumFromInt` requires that the integer maps to a declared tag. If you expect unknown values (e.g., file formats), consider a sentinel tag, validation paths, or separate integer parsing with explicit error handling.
+
+[[unions]]
+== Unions: Variant Data
+
+A tagged union carries both a tag and a payload; pattern matching is straightforward and type-safe. Untagged unions require you to manage the active field manually and are appropriate for low-level bit reinterpretations or FFI shims.
+
+[source,zig]
+----
+
+include::{sourcedir}/08__user-types-structs-enums-unions/union_demo.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run union_demo.zig
+----
+
+.Output
+[source,shell]
+----
+start: number=42
+update: hi
+raw u=0xFFFFFFFE i=-2
+----
+
+WARNING: Reading a different field from an untagged union without reinterpreting the bits (e.g., via `@bitCast`) is illegal; Zig prevents this at compile time. Prefer tagged unions for safety unless you truly need the control.
+
+=== Tagged Union Memory Representation
+
+Understanding how tagged unions are laid out in memory clarifies the safety vs space trade-off and explains when to choose tagged vs untagged unions:
+
+[mermaid]
+....
+graph TB
+    subgraph "Tagged Union Definition"
+        TAGGED["const Value = union(enum) {<br/>  number: i32,    // 4 bytes<br/>  text: []const u8, // 16 bytes (ptr+len)<br/>}"]
+    end
+    
+    subgraph "Tagged Union Memory (24 bytes on 64-bit)"
+        TAG_MEM["Memory Layout:<br/><br/>| tag (u8) | padding | payload (16 bytes) |<br/><br/>Tag identifies active field<br/>Payload holds largest variant"]
+    end
+    
+    subgraph "Untagged Union Definition"
+        UNTAGGED["const Raw = union {<br/>  number: i32,<br/>  text: []const u8,<br/>}"]
+    end
+    
+    subgraph "Untagged Union Memory (16 bytes)"
+        UNTAG_MEM["Memory Layout:<br/><br/>| payload (16 bytes) |<br/><br/>No tag - you track active field<br/>Size = largest variant only"]
+    end
+    
+    TAGGED --> TAG_MEM
+    UNTAGGED --> UNTAG_MEM
+    
+    subgraph "Access Patterns"
+        SAFE["Tagged: Safe Pattern Matching<br/>switch (value) {<br/>  .number => |n| use(n),<br/>  .text => |t| use(t),<br/>}"]
+        UNSAFE["Untagged: Manual Tracking<br/>// You must know which field is active<br/>const n = raw.number; // Unsafe!"]
+    end
+    
+    TAG_MEM --> SAFE
+    UNTAG_MEM --> UNSAFE
+....
+
+**Memory layout details:**
+
+**Tagged Union:**
+- Size = tag size + padding + largest variant size
+- Tag field (typically u8 or smallest integer that fits tag count)
+- Padding for alignment of payload
+- Payload space sized to hold the largest variant
+- Example: `union(enum) { i32, []const u8 }` = 1 byte tag + 7 bytes padding + 16 bytes payload = 24 bytes
+
+**Untagged Union:**
+- Size = largest variant size (no tag overhead)
+- No runtime tag to check
+- You're responsible for tracking which field is active
+- Example: `union { i32, []const u8 }` = 16 bytes (just the payload)
+
+**When to use each:**
+
+* **Use Tagged Unions** (default choice):
+  - Application logic with variant data types
+  - When you need exhaustive pattern matching
+  - Safety is more important than 1-8 bytes of tag overhead
+  - Error unions, option types, state machines
+
+* **Use Untagged Unions** (rare, expert use):
+  - FFI with C unions that don't have tags
+  - Bit reinterpretation with `@bitCast`
+  - Performance-critical code where tag overhead matters AND you can prove safety
+  - Type punning for low-level operations
+
+**Safety guarantees:**
+
+Tagged unions provide compile-time exhaustiveness checking and runtime tag validation:
+
+```zig
+const val = Value{ .number = 42 };
+switch (val) {
+    .number => |n| print("{}", .{n}),  // OK - matches tag
+    .text => |t| print("{s}", .{t}),  // Compiler ensures both cases covered
+}
+```
+
+Untagged unions require you to maintain safety invariants manually—the compiler can't help you.
+
+[[layout-anon]]
+== Layout and Anonymous Structs/Tuples
+
+When you must fit bits precisely (wire formats) or match C ABI layout, Zig offers `packed` and `extern`. Anonymous structs (often called "tuples") are convenient for quick multi-value returns.
+
+[source,zig]
+----
+
+include::{sourcedir}/08__user-types-structs-enums-unions/layout_and_anonymous.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run layout_and_anonymous.zig
+----
+
+.Output
+[source,shell]
+----
+packed.size=1
+extern.size=8 align=4
+pair[0]=x pair[1]=42 via names: x/42
+----
+
+NOTE: Tuple field access uses `@field(val, "0")` and `@field(val, "1")`. They're anonymous structs with numeric field names, which keeps them simple and allocation-free.
+
+=== Memory Layout: Default vs Packed vs Extern
+
+Zig offers three struct layout strategies, each with different trade-offs for memory efficiency, performance, and compatibility:
+
+[mermaid]
+....
+graph TB
+    subgraph "Default Layout (Optimized)"
+        DEF_CODE["const Point = struct {<br/>  x: u8,  // 1 byte<br/>  y: u32, // 4 bytes<br/>  z: u8,  // 1 byte<br/>};"]
+        DEF_MEM["Memory: 12 bytes<br/><br/>| x | pad(3) | y(4) | z | pad(3) |<br/><br/>Compiler reorders & pads for efficiency"]
+    end
+    
+    subgraph "Packed Layout (No Padding)"
+        PACK_CODE["const Flags = packed struct {<br/>  a: bool,  // 1 bit<br/>  b: u3,    // 3 bits<br/>  c: bool,  // 1 bit<br/>  d: u3,    // 3 bits<br/>};"]
+        PACK_MEM["Memory: 1 byte<br/><br/>| abcd(8 bits) |<br/><br/>No padding, bit-exact packing"]
+    end
+    
+    subgraph "Extern Layout (C ABI)"
+        EXT_CODE["const Data = extern struct {<br/>  x: u8,<br/>  y: u32,<br/>  z: u8,<br/>};"]
+        EXT_MEM["Memory: 12 bytes<br/><br/>| x | pad(3) | y(4) | z | pad(3) |<br/><br/>C ABI rules, field order preserved"]
+    end
+    
+    DEF_CODE --> DEF_MEM
+    PACK_CODE --> PACK_MEM
+    EXT_CODE --> EXT_MEM
+    
+    subgraph "Key Differences"
+        DIFF1["Default: Compiler can reorder fields<br/>Extern: Field order fixed<br/>Packed: Bit-level packing"]
+        DIFF2["Default: Optimized alignment<br/>Extern: Platform ABI alignment<br/>Packed: No alignment (bitfields)"]
+    end
+....
+
+**Layout mode comparison:**
+
+|===
+| Layout | Size/Alignment | Field Order | Use Case
+
+| **Default**
+| Optimized by compiler
+| Can be reordered
+| Normal Zig code
+
+| **Packed**
+| Bit-exact, no padding
+| Fixed, bit-level
+| Wire formats, bit flags
+
+| **Extern**
+| C ABI rules
+| Fixed (declaration order)
+| FFI, C interop
+|===
+
+**Detailed behavior:**
+
+**Default Layout:**
+```zig
+const Point = struct {
+    x: u8,   // Compiler might reorder this
+    y: u32,  // to minimize padding
+    z: u8,
+};
+// Compiler chooses optimal order, typically:
+// y (4 bytes, aligned) + x (1 byte) + z (1 byte) + padding
+```
+
+**Packed Layout:**
+```zig
+const Flags = packed struct {
+    enabled: bool,    // bit 0
+    mode: u3,         // bits 1-3  
+    priority: u4,     // bits 4-7
+};
+// Total: 8 bits = 1 byte, no padding
+// Perfect for hardware registers and wire protocols
+```
+
+**Extern Layout:**
+```zig
+const CHeader = extern struct {
+    version: u32,  // Matches C struct layout exactly
+    flags: u16,    // Field order preserved
+    padding: u16,  // Explicit padding if needed
+};
+// For calling C functions or reading C-written binary data
+```
+
+**When to use each layout:**
+
+* **Default** (no modifier):
+  - All normal Zig code
+  - When you don't need specific memory layout
+  - Let the compiler optimize for you
+
+* **Packed**:
+  - Wire protocols with bit-level fields
+  - Hardware register definitions
+  - When you need exact bit positions
+  - Space-critical flags and options
+  - **Warning**: Can be slower due to bit operations
+
+* **Extern**:
+  - FFI with C/C++ structs
+  - Reading binary file formats defined by other languages
+  - When field order must match external specification
+  - ABI compatibility requirements
+
+**Important notes:**
+
+* Use `@sizeOf(T)` and `@alignOf(T)` to verify layout
+* Packed structs can be slower—measure before optimizing
+* Extern structs must match the C definition exactly (including padding)
+* Default layout may change between compiler versions (always safe, but field order not guaranteed)
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Methods are sugar-free; consider making helpers `pub` inside the struct for discoverability and test scoping.
+* Enum reprs (`enum(uN)`) define size and affect ABI/FFI—choose the smallest that fits your protocol.
+* Untagged unions are sharp tools. In most application code, prefer tagged unions and pattern matching.
+
+[[exercises]]
+== Exercises
+
+* Add a `scale` method to `Point` that multiplies both coordinates by a `f64`, then reworks `len` to avoid precision loss for large integers.
+* Extend `Mode` with a new `Error` state and observe how the compiler enforces an updated `switch`.
+* Create a tagged union representing a JSON scalar (`null`, `bool`, `number`, `string`) and write a `print` function that formats each case.
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* ABI layout: `extern` respects the platform ABI. Verify sizes with `@sizeOf`/`@alignOf` and cross-compile when shipping libraries.
+* Bit packing: `packed struct` compresses fields but can increase instruction count; measure before committing in hot paths.
+* Tuples vs named structs: prefer named structs for stable APIs; tuples shine for local, short-lived glue.

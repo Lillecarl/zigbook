@@ -1,0 +1,290 @@
+////
+changes: ["Added end-to-end C bridge example", "Documented extern struct ABI alignment"]
+examples_compile: yes
+keywords: ["c-interop", "abi", "@cImport"]
+last_updated: 2025-11-05
+last_verified: 2025-11-05
+next_chapter: "34__project-c-backed-library"
+open_questions: []
+previous_chapter: "32__project-http-json-client"
+status: draft
+xref_complete: true
+////
+
+= C Interop: Import, Export, ABI
+:chapter-number: 33
+:chapter-slug: c-interop-import-export-abi
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Our HTTP client from the previous chapter consumed data authored in Zig (xref:32__project-http-json-client.adoc[32]); real systems often have to lean on years of C code instead. This chapter shows how Zig 0.15.2 treats C as a first-class citizen: we pull in headers with `@cImport`, export Zig functions back to C, and verify that records keep their ABI promises. link:https://github.com/ziglang/zig/tree/master/lib/std/c.zig[c.zig]
+
+The standard library now routes both `std.c` and `std.builtin.CallingConvention` through the same modernization that touched the I/O stack, so this chapter highlights the most relevant changes while keeping the examples runnable with nothing more than `zig run`. link:https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig[builtin.zig], link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
+
+=== The C Interoperability Architecture
+
+Before diving into `@cImport` mechanics, it's valuable to understand how Zig's C interop layer is organized. The following diagram shows the complete architecture from user code down to libc and system calls:
+
+[mermaid]
+....
+graph TB
+    subgraph "User Code Layer"
+        USER["User Application Code"]
+    end
+
+    subgraph "Standard Library Abstractions"
+        OS["std.os<br/>OS-specific wrappers"]
+        POSIX["std.posix<br/>POSIX API layer"]
+        FS["std.fs<br/>Filesystem API"]
+        NET["std.net<br/>Networking API"]
+        PROCESS["std.process<br/>Process management"]
+    end
+
+    subgraph "C Interoperability Layer"
+        C["std.c<br/>Main C types module"]
+
+        subgraph "Platform-Specific Modules"
+            DARWIN["c/darwin.zig<br/>macOS/iOS types"]
+            FREEBSD["c/freebsd.zig<br/>FreeBSD types"]
+            LINUX["os/linux.zig<br/>Linux syscalls"]
+            WINDOWS["os/windows.zig<br/>Windows API"]
+            NETBSD["c/netbsd.zig<br/>NetBSD types"]
+            OPENBSD["c/openbsd.zig<br/>OpenBSD types"]
+            SOLARIS["c/solaris.zig<br/>Solaris types"]
+            HAIKU["c/haiku.zig<br/>Haiku types"]
+            DRAGONFLY["c/dragonfly.zig<br/>DragonflyBSD types"]
+        end
+
+        C --> DARWIN
+        C --> FREEBSD
+        C --> LINUX
+        C --> WINDOWS
+        C --> NETBSD
+        C --> OPENBSD
+        C --> SOLARIS
+        C --> HAIKU
+        C --> DRAGONFLY
+    end
+
+    subgraph "System Layer"
+        LIBC["libc<br/>C Standard Library"]
+        SYSCALL["System Calls<br/>Direct syscall interface"]
+        WINAPI["Windows API<br/>kernel32/ntdll"]
+    end
+
+    USER --> OS
+    USER --> POSIX
+    USER --> FS
+    USER --> NET
+    USER --> PROCESS
+
+    OS --> C
+    POSIX --> C
+    FS --> POSIX
+    NET --> POSIX
+    PROCESS --> POSIX
+
+    DARWIN --> LIBC
+    FREEBSD --> LIBC
+    NETBSD --> LIBC
+    OPENBSD --> LIBC
+    SOLARIS --> LIBC
+    HAIKU --> LIBC
+    DRAGONFLY --> LIBC
+
+    LINUX --> LIBC
+    LINUX --> SYSCALL
+
+    WINDOWS --> WINAPI
+....
+
+This architecture reveals that `std.c` is not a monolithic module—it's a dispatcher that uses compile-time logic (`builtin.os.tag`) to import platform-specific C type definitions. When you write Zig code for macOS, `std.c` pulls types from `c/darwin.zig`; on FreeBSD, it uses `c/freebsd.zig`; on Windows, `os/windows.zig`; and so forth. These platform-specific modules define C types like `c_int`, `timespec`, `fd_t`, and platform constants, then interface with either libc (when `-lc` is specified) or direct system calls (on Linux). Importantly, Zig's own standard library (`std.fs`, `std.net`, `std.process`) uses this same C interop layer—when you call `std.posix.open()`, it resolves to `std.c.open()` internally. Understanding this architecture helps you reason about why certain C types are available on some platforms but not others, why `-lc` is needed for linking libc symbols, and how your `@cImport` code sits alongside Zig's built-in C interop.
+
+[[learning-goals]]
+== Learning Goals
+
+* Wire a Zig executable to C headers and companion source using `@cImport` and the built-in C toolchain.
+* Export Zig functions with a C ABI so existing C code can invoke them without glue.
+* Map C structs onto Zig `extern` structs and confirm that layout, size, and call semantics align.
+
+[[importing-c-apis]]
+== Importing C APIs into Zig
+
+`@cImport` compiles a slice of C code alongside your Zig module, honoring include paths, defines, and extra C sources you pass on the command line. This lets one executable take dependencies on both languages without a separate build system.
+
+[[c-roundtrip]]
+=== Round-tripping through `@cImport`
+
+The first example pulls a header and C source that multiply two integers, then demonstrates calling a Zig-exported function from inline C in the same header.
+
+[source,zig]
+----
+include::{sourcedir}/33__c-interop-import-export-abi/01_c_roundtrip.zig[]
+----
+
+This program includes `bridge.h` via `@cInclude`, links the accompanying `bridge.c`, and exports `zig_add` with the platform's C calling convention so inline C can call back into Zig.
+
+.Run
+[source,shell]
+----
+$ zig run \
+    -Ichapters-data/code/33__c-interop-import-export-abi \
+    chapters-data/code/33__c-interop-import-export-abi/01_c_roundtrip.zig \
+    chapters-data/code/33__c-interop-import-export-abi/bridge.c
+----
+
+.Output
+[source,shell]
+----
+c_mul(6, 7) = 42
+call_zig_add(19, 23) = 42
+----
+
+IMPORTANT: Passing `-I` keeps the header discoverable, and listing the C file on the same command line instructs the Zig compiler to compile and link it into the run artifact. link:https://github.com/ziglang/zig/tree/master/lib/std/build.zig[build.zig]
+
+[[exporting-zig]]
+=== Exporting Zig functions to C
+
+Zig functions gain a C ABI when you mark them `export` and select `callconv(.c)`, which expands to the target's default C calling convention. Anything callable from inline C via `@cImport` can also be called from a separately compiled C object with the same prototype, so this pattern works equally well when you ship a shared library.
+
+=== Understanding C Calling Conventions
+
+The `callconv(.c)` annotation is not a single universal calling convention—it resolves to platform-specific conventions based on the target architecture. The following diagram shows how this resolution works:
+
+[mermaid]
+....
+graph LR
+    subgraph "C Calling Convention Resolution"
+        TARGET["target.cCallingConvention()"]
+
+        TARGET --> X86["x86_64: SysV or Win64"]
+        TARGET --> ARM["aarch64: AAPCS"]
+        TARGET --> WASM["wasm32/64: C"]
+        TARGET --> RISCV["riscv64: C"]
+        TARGET --> SPIRV["spirv: unsupported"]
+    end
+
+    subgraph "Platform Specifics"
+        X86 --> SYSV["SysV<br/>Linux, macOS, BSD"]
+        X86 --> WIN64["Win64<br/>Windows"]
+        ARM --> AAPCS["AAPCS<br/>standard ARM ABI"]
+    end
+....
+
+When you write `callconv(.c)`, Zig automatically selects the appropriate C calling convention for your target. On x86_64 Linux, macOS, or BSD systems, this resolves to System V ABI—arguments pass in registers `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`, then stack; return values use `rax`. On x86_64 Windows, it becomes Win64 calling convention—arguments pass in `rcx`, `rdx`, `r8`, `r9`, then stack; the caller must reserve shadow space. On ARM (aarch64), it's AAPCS (ARM Architecture Procedure Call Standard) with its own register usage rules. This automatic resolution is why the same `export fn zig_add(a: i32, b: i32) callconv(.c) i32` works correctly across platforms without modification—Zig generates the right prologue, epilogue, and register usage for each target. When debugging calling convention mismatches or writing assembly interop, knowing which convention is active helps you match register assignments and stack layouts correctly.
+
+[[abi-compatibility]]
+== Matching data layouts and ABI guarantees
+
+Being callable is only half the work; you also need to agree on layout rules so that structs and aggregates have the same size, alignment, and field ordering on both sides of the boundary. 
+
+=== Understanding ABIs and Object Formats
+
+The Application Binary Interface (ABI) defines calling conventions, name mangling, struct layout rules, and how types are passed between functions. Different ABIs have different rules, which affect C interop compatibility:
+
+[mermaid]
+....
+graph TB
+    subgraph "Common ABIs"
+        ABI["Abi enum"]
+
+        ABI --> GNU["gnu<br/>GNU toolchain"]
+        ABI --> MUSL["musl<br/>musl libc"]
+        ABI --> MSVC["msvc<br/>Microsoft Visual C++"]
+        ABI --> NONE["none<br/>freestanding"]
+        ABI --> ANDROID["android, gnueabi, etc<br/>platform variants"]
+    end
+
+    subgraph "Object Formats"
+        OFMT["ObjectFormat enum"]
+
+        OFMT --> ELF["elf<br/>Linux, BSD"]
+        OFMT --> MACHO["macho<br/>Darwin systems"]
+        OFMT --> COFF["coff<br/>Windows PE"]
+        OFMT --> WASM["wasm<br/>WebAssembly"]
+        OFMT --> C["c<br/>C source output"]
+        OFMT --> SPIRV["spirv<br/>Shaders"]
+    end
+....
+
+The ABI choice affects how `extern struct` fields are laid out. The **gnu** ABI (GNU toolchain, used on most Linux systems) follows specific struct padding and alignment rules from GCC. The **msvc** ABI (Microsoft Visual C++) has different rules—for example, `long` is 32-bit on Windows x64 but 64-bit on Linux x64. The **musl** ABI targets musl libc with slightly different calling conventions than glibc. The **none** ABI is for freestanding environments with no libc. When you declare `extern struct SensorData`, Zig uses the target's ABI rules to compute field offsets and padding, ensuring they match what C would produce. The object format (ELF, Mach-O, COFF, WASM) determines which linker is used and how symbols are encoded, but the ABI determines the actual memory layout. This is why the chapter emphasizes `@sizeOf` checks—if Zig and C disagree about struct size, you likely have an ABI mismatch or wrong target specification.
+
+[[extern-structs]]
+=== `extern struct` for shared layouts
+
+This example mirrors a C struct that the sensor firmware publishes. We import the header, declare an `extern struct` with matching fields, and double-check that Zig and C agree about the size before calling helper routines compiled from C.
+
+[source,zig]
+----
+include::{sourcedir}/33__c-interop-import-export-abi/02_abi_layout.zig[]
+----
+
+The helper functions originate from `abi.c`, so the run command links both files and exposes the C aggregation routine to Zig.
+
+.Run
+[source,shell]
+----
+$ zig run \
+    -Ichapters-data/code/33__c-interop-import-export-abi \
+    chapters-data/code/33__c-interop-import-export-abi/02_abi_layout.zig \
+    chapters-data/code/33__c-interop-import-export-abi/abi.c
+----
+
+.Output
+[source,shell]
+----
+sizeof(C struct) = 8
+sizeof(Zig extern struct) = 8
+left port 7: 258 status bits, 42.50 °C
+right port 9: 4 status bits, 38.00 °C
+combined_voltage = 1.067
+----
+
+TIP: If the `@sizeOf` assertions disagree, double-check padding bytes and prefer `extern struct` over `packed` unless you have an explicit reason to change ABI rules.
+
+[[tooling-translate-c]]
+=== translate-c and build integration
+
+For larger headers, consider running `zig translate-c` to snapshot them into Zig source. The build system can also register C objects and headers via `addCSourceFile` and `addIncludeDir`, making the `zig run` invocations above part of a repeatable package instead of ad-hoc commands.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Zig does not automatically link platform libraries; pass `-lc` or add the appropriate build options when importing APIs that live outside your project.
+* `@cImport` emits one translation unit; wrap headers in `#pragma once` or include guards to avoid duplicate definitions just as you would in pure C projects.
+* Avoid `packed` unless you control both compilers and targets; packed fields can change alignment guarantees and lead to unaligned loads on architectures that forbid them.
+
+[[exercises]]
+== Exercises
+
+* Extend `bridge.h` with a function that returns a struct by value and demonstrate consuming it from Zig without copying through pointers.
+* Export a Zig function that fills a caller-provided C buffer and inspect its symbol with `zig build-obj` plus `llvm-nm` or your platform's equivalent.
+* Swap `extern struct` for a `packed struct` in the ABI example and run it on a target with strict alignment to observe the differences in emitted machine code.
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, alternatives, edge cases
+
+* Some C ABIs mangle names (e.g., Windows `__stdcall`); override the calling convention or use `@export` with an explicit symbol name when interoperating with non-default ABIs.
+* `@cImport` cannot compile C++—translate headers with `extern "C"` wrappers or use a C shim when binding C++ libraries.
+* When bridging variadic functions, prefer writing a Zig wrapper that marshals arguments explicitly; Zig's variadics only cover C's default promotions, not custom ellipsis semantics.

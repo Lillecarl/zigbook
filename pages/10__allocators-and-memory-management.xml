@@ -1,0 +1,338 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Allocators &amp; Memory Management</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Zig&#8217;s approach to dynamic memory is explicit, composable, and testable. Rather than hiding allocation behind implicit globals, APIs accept a <literal>std.mem.Allocator</literal> and return ownership clearly to their caller. This chapter shows the core allocator interface (<literal>alloc</literal>, <literal>free</literal>, <literal>realloc</literal>, <literal>resize</literal>, <literal>create</literal>, <literal>destroy</literal>), introduces the most common allocator implementations (page allocator, Debug/GPA with leak detection, arenas, and fixed buffers), and establishes patterns for passing allocators through your own APIs (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/mem/Allocator.zig">Allocator.zig</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/heap.zig">heap.zig</link>).</simpara>
+<simpara>You&#8217;ll learn when to prefer bulk-free arenas, how to use a fixed stack buffer to eliminate heap traffic, and how to grow and shrink allocations safely. These skills underpin the rest of the book—from collections to I/O adapters—and will make the later projects both faster and more robust (see <link xl:href="03__data-fundamentals.xml">03</link>).</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Use <literal>std.mem.Allocator</literal> to allocate, free, and resize typed slices and single items.</simpara>
+</listitem>
+<listitem>
+<simpara>Choose an allocator: page allocator, Debug/GPA (leak detection), arena, fixed buffer, or a stack-fallback composition.</simpara>
+</listitem>
+<listitem>
+<simpara>Design functions that accept an allocator and return owned memory to the caller (see <link xl:href="08__user-types-structs-enums-unions.xml">08</link>).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="interface">
+<title>The Allocator Interface</title>
+<simpara>Zig&#8217;s allocator is a small, value-type interface with methods for typed allocation and explicit deallocation. The wrappers handle sentinels and alignment so you can stay at the <literal>[]T</literal> level most of the time.</simpara>
+<section xml:id="interface-basics">
+<title>alloc/free, create/destroy, and sentinels</title>
+<simpara>The essentials: allocate a typed slice, mutate its elements, then free. For single items, prefer <literal>create</literal>/<literal>destroy</literal>. Use <literal>allocSentinel</literal> (or <literal>dupeZ</literal>) when you need a null terminator for C interop.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 10__allocators-and-memory-management.adoc - include::example$chapters-data/code/10__allocators-and-memory-management/alloc_free_basics.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run alloc_free_basics.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">buf: abcde
+point: (x=7, y=-3)
+zstr: hello</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Prefer <literal>{s}</literal> to print <literal>[]const u8</literal> slices (no terminator required). Use <literal>allocSentinel</literal> or <literal>dupeZ</literal> when interoperating with APIs that require a trailing <literal>\0</literal>.</simpara>
+</tip>
+<section xml:id="allocator-vtable">
+<title>How the Allocator Interface Works Under the Hood</title>
+<simpara>The <literal>std.mem.Allocator</literal> type is a type-erased interface using a pointer and vtable. This design allows any allocator implementation to be passed through the same interface, enabling runtime polymorphism without virtual dispatch overhead for the common case.</simpara>
+<literallayout class="monospaced">graph TB
+    ALLOC["Allocator"]
+    PTR["ptr: *anyopaque"]
+    VTABLE["vtable: *VTable"]
+
+    ALLOC --&gt; PTR
+    ALLOC --&gt; VTABLE
+
+    subgraph "VTable Functions"
+        ALLOCFN["alloc(*anyopaque, len, alignment, ret_addr)"]
+        RESIZEFN["resize(*anyopaque, memory, alignment, new_len, ret_addr)"]
+        REMAPFN["remap(*anyopaque, memory, alignment, new_len, ret_addr)"]
+        FREEFN["free(*anyopaque, memory, alignment, ret_addr)"]
+    end
+
+    VTABLE --&gt; ALLOCFN
+    VTABLE --&gt; RESIZEFN
+    VTABLE --&gt; REMAPFN
+    VTABLE --&gt; FREEFN
+
+    subgraph "High-Level API"
+        CREATE["create(T)"]
+        DESTROY["destroy(ptr)"]
+        ALLOCAPI["alloc(T, n)"]
+        FREE["free(slice)"]
+        REALLOC["realloc(slice, new_len)"]
+    end
+
+    ALLOC --&gt; CREATE
+    ALLOC --&gt; DESTROY
+    ALLOC --&gt; ALLOCAPI
+    ALLOC --&gt; FREE
+    ALLOC --&gt; REALLOC</literallayout>
+<simpara>The vtable contains four fundamental operations:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">alloc</emphasis>: Returns a pointer to <literal>len</literal> bytes with specified alignment, or error on failure</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">resize</emphasis>: Attempts to expand or shrink memory in place, returns <literal>bool</literal></simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">remap</emphasis>: Attempts to expand or shrink memory, allowing relocation (used by <literal>realloc</literal>)</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">free</emphasis>: Frees and invalidates a region of memory</simpara>
+</listitem>
+</itemizedlist>
+<simpara>The high-level API (<literal>create</literal>, <literal>destroy</literal>, <literal>alloc</literal>, <literal>free</literal>, <literal>realloc</literal>) wraps these vtable functions with type-safe, ergonomic methods. This two-layer design keeps allocator implementations simple while providing convenient typed allocation to users (see <link xl:href="https://github.com/ziglang/zig/blob/master/lib/std/mem/Allocator.zig">Allocator.zig</link>).</simpara>
+</section>
+</section>
+<section xml:id="gpa-arena">
+<title>Debug/GPA and Arena Allocators</title>
+<simpara>For whole-program work, a Debug/GPA is the default: it tracks allocations and reports leaks at <literal>deinit()</literal>. For scoped, scratch allocations, an arena returns everything in one shot during <literal>deinit()</literal>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 10__allocators-and-memory-management.adoc - include::example$chapters-data/code/10__allocators-and-memory-management/gpa_arena.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run gpa_arena.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">gpa sum: 10
+arena msg len: 31</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>In Zig 0.15.x, <literal>std.heap.GeneralPurposeAllocator</literal> is a thin alias to the Debug allocator. Always check the return of <literal>deinit()</literal>: <literal>.leak</literal> indicates something wasn&#8217;t freed.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="composition">
+<title>Choosing and Composing Allocators</title>
+<simpara>Allocators are regular values: you can pass them, wrap them, and compose them. Two workhorse tools are the fixed buffer allocator (for stack-backed bursts of allocations) and <literal>realloc</literal>/<literal>resize</literal> for dynamic growth and shrinkage.</simpara>
+<section xml:id="allocator-wrapping">
+<title>Wrapping Allocators for Safety and Debugging</title>
+<simpara>Because allocators are just values with a common interface, you can <emphasis role="strong">wrap</emphasis> one allocator to add functionality. The <literal>std.mem.validationWrap</literal> function demonstrates this pattern by adding safety checks before delegating to an underlying allocator.</simpara>
+<literallayout class="monospaced">graph TB
+    VA["ValidationAllocator(T)"]
+    UNDERLYING["underlying_allocator: T"]
+
+    VA --&gt; UNDERLYING
+
+    subgraph "Validation Checks"
+        CHECK1["Assert n &gt; 0 in alloc"]
+        CHECK2["Assert alignment is correct"]
+        CHECK3["Assert buf.len &gt; 0 in resize/free"]
+    end
+
+    VA --&gt; CHECK1
+    VA --&gt; CHECK2
+    VA --&gt; CHECK3
+
+    UNDERLYING_PTR["getUnderlyingAllocatorPtr()"]
+    VA --&gt; UNDERLYING_PTR</literallayout>
+<simpara>The <literal>ValidationAllocator</literal> wrapper validates that:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Allocation sizes are greater than zero</simpara>
+</listitem>
+<listitem>
+<simpara>Returned pointers have correct alignment</simpara>
+</listitem>
+<listitem>
+<simpara>Memory lengths are valid in resize/free operations</simpara>
+</listitem>
+</itemizedlist>
+<tip>
+<simpara><emphasis role="strong">This pattern is powerful:</emphasis> you can build custom allocator wrappers that add logging, metrics collection, memory limits, or other cross-cutting concerns without modifying the underlying allocator. The wrapper simply delegates to <literal>underlying_allocator</literal> after performing its checks or side effects. <link xl:href="https://github.com/ziglang/zig/blob/master/lib/std/mem.zig">mem.zig</link></simpara>
+</tip>
+</section>
+<section xml:id="fixed-buffer">
+<title>Fixed buffer on the stack</title>
+<simpara>Use a <literal>FixedBufferAllocator</literal> to get fast, zero-syscall allocations from a stack array. When you run out, you&#8217;ll get <literal>error.OutOfMemory</literal>—exactly the signal you need to fall back or trim inputs.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 10__allocators-and-memory-management.adoc - include::example$chapters-data/code/10__allocators-and-memory-management/fixed_buffer.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run fixed_buffer.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">fixed buffer OOM as expected</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>For a graceful fallback, compose a fixed buffer over a slower allocator with <literal>std.heap.stackFallback(N, fallback)</literal>. The returned object has a <literal>.get()</literal> method that yields a fresh <literal>Allocator</literal> each time.</simpara>
+</tip>
+</section>
+<section xml:id="resize-realloc">
+<title>Growing and shrinking safely with realloc/resize</title>
+<simpara><literal>realloc</literal> returns a new slice (and may move the allocation). <literal>resize</literal> attempts to change length in place and returns <literal>bool</literal>; remember to also update your slice’s <literal>len</literal> when it succeeds.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 10__allocators-and-memory-management.adoc - include::example$chapters-data/code/10__allocators-and-memory-management/resize_and_realloc.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run resize_and_realloc.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">len=4 contents=ABCD
+grown len=8 contents=ABCDabcd
+shrunk (realloc) len=3 contents=ABC</programlisting>
+</para>
+</formalpara>
+<warning>
+<simpara>After <literal>resize(buf, n) == true</literal>, the old <literal>buf</literal> still has its previous <literal>len</literal>. Re-slice it (<literal>buf = buf[0..n]</literal>) so downstream code sees the new length.</simpara>
+</warning>
+<section xml:id="alignment-system">
+<title>How Alignment Works Under the Hood</title>
+<simpara>Zig&#8217;s memory system uses a compact power-of-two alignment representation. The <literal>std.mem.Alignment</literal> enum stores alignment as a log₂ value, allowing efficient storage while providing rich utility methods.</simpara>
+<literallayout class="monospaced">graph LR
+    ALIGNMENT["Alignment enum"]
+
+    subgraph "Alignment Values"
+        A1["@'1' = 0"]
+        A2["@'2' = 1"]
+        A4["@'4' = 2"]
+        A8["@'8' = 3"]
+        A16["@'16' = 4"]
+    end
+
+    ALIGNMENT --&gt; A1
+    ALIGNMENT --&gt; A2
+    ALIGNMENT --&gt; A4
+    ALIGNMENT --&gt; A8
+    ALIGNMENT --&gt; A16
+
+    subgraph "Key Methods"
+        TOBYTES["toByteUnits() -&gt; usize"]
+        FROMBYTES["fromByteUnits(n) -&gt; Alignment"]
+        OF["of(T) -&gt; Alignment"]
+        FORWARD["forward(address) -&gt; usize"]
+        BACKWARD["backward(address) -&gt; usize"]
+        CHECK["check(address) -&gt; bool"]
+    end
+
+    ALIGNMENT --&gt; TOBYTES
+    ALIGNMENT --&gt; FROMBYTES
+    ALIGNMENT --&gt; OF
+    ALIGNMENT --&gt; FORWARD
+    ALIGNMENT --&gt; BACKWARD
+    ALIGNMENT --&gt; CHECK</literallayout>
+<simpara>This compact representation provides utility methods for:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Converting to/from byte units</emphasis>: <literal>@"16".toByteUnits()</literal> returns <literal>16</literal>, <literal>fromByteUnits(16)</literal> returns <literal>@"16"</literal></simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Aligning addresses forward</emphasis>: <literal>forward(addr)</literal> rounds up to next aligned boundary</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Aligning addresses backward</emphasis>: <literal>backward(addr)</literal> rounds down to previous aligned boundary</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Checking alignment</emphasis>: <literal>check(addr)</literal> returns <literal>true</literal> if address meets alignment requirement</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Type alignment</emphasis>: <literal>of(T)</literal> returns the alignment of type <literal>T</literal></simpara>
+</listitem>
+</itemizedlist>
+<simpara>When you see <literal>alignedAlloc(T, .@"16", n)</literal> or use alignment in custom allocators, you&#8217;re working with this log₂ representation. The compact storage allows Zig to track alignment efficiently without wasting space (see <link xl:href="https://github.com/ziglang/zig/blob/master/lib/std/mem.zig">mem.zig</link>).</simpara>
+</section>
+</section>
+<section xml:id="allocator-param">
+<title>Allocator-as-parameter pattern</title>
+<simpara>Your APIs should accept an allocator and return owned memory to the caller. This keeps lifetimes explicit and lets your users pick the right allocator for their context (arena for scratch, GPA for general use, fixed buffer when available).</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 10__allocators-and-memory-management.adoc - include::example$chapters-data/code/10__allocators-and-memory-management/allocator_parameter.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run allocator_parameter.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">gpa: zig-likes-allocators
+fba: OOM as expected</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Returning <literal>[]u8</literal> (or <literal>[]T</literal>) shifts ownership cleanly to the caller; document that the caller must <literal>free</literal>. When you can, offer a <literal>comptime</literal>-friendly variant that writes into a caller-provided buffer. <link xl:href="04__errors-resource-cleanup.xml">04</link></simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Free what you allocate. In this book, examples use <literal>defer allocator.free(buf)</literal> immediately after a successful <literal>alloc</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Shrinking: prefer <literal>resize</literal> for in-place shrink; fall back to <literal>realloc</literal> if it returns <literal>false</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Arenas: never return arena-owned memory to long-lived callers. Arena memory dies at <literal>deinit()</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>GPA/Debug: check <literal>deinit()</literal> and wire leak detection into tests with <literal>std.testing</literal> (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/testing.zig">testing.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Fixed buffers: great for bounded workloads; combine with <literal>stackFallback</literal> to degrade gracefully.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Implement <literal>splitJoin(allocator, s: []const u8, needle: u8) ![]u8</literal> that splits on a byte and rejoins with <literal>'-'</literal>. Add a variant that writes into a caller buffer.</simpara>
+</listitem>
+<listitem>
+<simpara>Rewrite one of your earlier CLI tools to accept an allocator from <literal>main</literal> and plumb it through. Try <literal>ArenaAllocator</literal> for transient buffers. <link xl:href="06__project-grep-lite.xml">06</link></simpara>
+</listitem>
+<listitem>
+<simpara>Wrap <literal>FixedBufferAllocator</literal> with <literal>stackFallback</literal> and show how the same function succeeds on small inputs but falls back for larger ones.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Alignment-sensitive allocations: use <literal>alignedAlloc(T, .@"16", n)</literal> or typed helpers that propagate alignment.</simpara>
+</listitem>
+<listitem>
+<simpara>Zero-sized types and zero-length slices are supported by the interface; don&#8217;t special-case them.</simpara>
+</listitem>
+<listitem>
+<simpara>C interop: when linking libc, consider <literal>c_allocator</literal>/<literal>raw_c_allocator</literal> for matching foreign allocation semantics; otherwise prefer page allocator/GPA.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>Zip/Unzip with Progress</subtitle>
+<date>2025-11-15</date>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>The previous project focused on deterministic text analytics; now we bundle those artifacts and the surrounding diagnostics into a reproducible archive pipeline. <link xl:href="53__project-top-k-word-frequency-analyzer.xml">53</link> We will write a minimalist ZIP creator that streams files into memory, emits the central directory, then verifies extraction while reporting incremental progress. The program leans on the standard library&#8217;s ZIP reader, manual header encoding, <literal>StringHashMap</literal> bookkeeping for CRC32 checks, and structured status updates through <literal>std.Progress</literal>. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/zip.zig">zip.zig</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/hash_map.zig">hash_map.zig</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/hash/crc.zig">crc.zig</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Progress.zig">Progress.zig</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Assemble a ZIP archive from scratch by writing Local File Headers, the Central Directory, and the End of Central Directory record in the correct order while honoring size and offset constraints.</simpara>
+</listitem>
+<listitem>
+<simpara>Capture deterministic integrity metrics (CRC32, SHA-256) alongside the bundle so continuous integration can validate both structure and content on every run. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/crypto.zig">crypto.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Surface analyst-friendly progress messages that stay scriptable by disabling the animated renderer and emitting plain-text checkpoints with <literal>std.Progress</literal>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="pipeline-design">
+<title>Designing the pipeline</title>
+<simpara>The workflow runs in three phases: seed sample files, build an archive, and extract plus verify. Each phase increments the root progress node, producing deterministic console summaries that double as acceptance criteria. All filesystem operations occur under a temporary directory managed by <literal>std.testing.tmpDir</literal>, keeping the real workspace clean. <link xl:href="47__time-logging-and-progress.xml">47</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/testing.zig">testing.zig</link></simpara>
+<simpara>For archival metadata, we reuse the same relative paths when writing headers and when later validating the extracted files. Storing the CRC32 and byte count per path inside a <literal>StringHashMap</literal> gives us a straightforward way to diff expectations against actual outputs after extraction.</simpara>
+</chapter>
+<chapter xml:id="archive-assembly">
+<title>Archive assembly</title>
+<simpara>Because Zig 0.15.2 ships a ZIP reader but not a writer, we build the archive in memory using an <literal>ArrayList(u8)</literal>, appending each component in sequence: Local File Header, filename, file bytes. Every header field is written with explicit little-endian helpers so the result is portable across architectures. Once the payloads land in the blob, we append the Central Directory (one record per file) followed by the End of Central Directory record, mirroring the structures defined in the PKWARE APPNOTE and encoded in <literal>std.zip</literal>. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/array_list.zig">array_list.zig</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig">fmt.zig</link></simpara>
+<simpara>While writing headers we ensure sizes and offsets fit in 32-bit fields (sticking to the classic ZIP subset) and duplicate the filename once into the map so we can free resources deterministically later. After the archive image is complete, we persist it to disk and compute a SHA-256 digest for downstream regressions—the digest is rendered with <literal>std.fmt.bytesToHex</literal> so it can be compared inline without any extra tooling.</simpara>
+</chapter>
+<chapter xml:id="extraction-and-verification">
+<title>Extraction and verification</title>
+<simpara>Extraction reuses the standard library iterator, which walks through each Central Directory record and hands the data stream to <literal>std.zip.Entry.extract</literal>; we normalize the root folder name through <literal>std.zip.Diagnostics</literal> so we can surface it to the caller. After each file lands on disk, we compute CRC32 again and compare the byte count against the recorded expectation. Any mismatch fails the program immediately, making it safe to embed in CI pipelines or deployment hooks.</simpara>
+<simpara><literal>std.Progress</literal> nodes drive the console output: the root node tracks the three high-level stages, while child nodes count through the file list during seeding, building, and verification. Because printing is disabled, the final messages are ordinary text lines (rendered via a buffered stdout writer) that can be diffed verbatim in automated tests. <link xl:href="47__time-logging-and-progress.xml">47</link></simpara>
+</chapter>
+<chapter xml:id="code-listing">
+<title>End-to-end implementation</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 54__project-zip-unzip-with-progress.adoc - include::example$chapters-data/code/54__project-zip-unzip-with-progress/zip_progress_pipeline.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run zip_progress_pipeline.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">[1/3] seeded samples -&gt; files=4, bytes=250
+[2/3] built archive -&gt; bytes=716
+    sha256=4a13a3dc1e6ef90c252b0cc797ff14456aa28c670cafbc9d27a025b0079b05d5
+[3/3] extracted + verified -&gt; files=4, bytes=250, root=input</programlisting>
+</para>
+</formalpara>
+<simpara>The verification step intentionally duplicates the extracted root string when diagnostics discover a common prefix; the summary frees that buffer afterward to keep the general-purpose allocator clean. This mirrors good hygiene for CLI utilities that stream large archives through temporary directories. <link xl:href="52__debug-and-valgrind.xml">52</link></simpara>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>The writer sticks to the classic (non-Zip64) subset; once files exceed 4 GiB you must upgrade the headers and extra fields, or delegate to a dedicated ZIP library. <link xl:href="44__collections-and-algorithms.xml">44</link></simpara>
+</listitem>
+<listitem>
+<simpara>Progress nodes are nested but printing is disabled; if you want live TTY updates, drop <literal>.disable_printing = true</literal> and let the renderer clear frames. Remember that doing so sacrifices determinism in captured logs. <link xl:href="47__time-logging-and-progress.xml">47</link></simpara>
+</listitem>
+<listitem>
+<simpara>CRC32 confirms integrity but not authenticity. Combine the SHA-256 digest with a signature or attach the archive to a <literal>zig build</literal> step for reproducible deployment pipelines. <link xl:href="39__performance-and-inlining.xml">39</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend the builder to emit Zip64 records when any file crosses the 4 GiB boundary. Keep the legacy path for small bundles and write regression tests that validate both. <link xl:href="33__c-interop-import-export-abi.xml">33</link></simpara>
+</listitem>
+<listitem>
+<simpara>Replace the in-memory blob with a streaming writer that flushes to disk in chunks; compare throughput and memory consumption under <literal>perf</literal> or <literal>zig build test</literal> with large synthetic files. <link xl:href="41__cross-compilation-and-wasm.xml">41</link></simpara>
+</listitem>
+<listitem>
+<simpara>Add a command-line flag that accepts an ignore list (glob patterns) before archiving, then report the exact number of skipped files alongside the existing totals. <link xl:href="36__style-and-best-practices.xml">36</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/Dir.zig">Dir.zig</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Streaming archives straight to stdout is great for pipelines but makes verification trickier; consider writing to a temporary file first so you can re-open it for checksums before shipping it onward. <link xl:href="28__filesystem-and-io.xml">28</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig">File.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>ZIP encryption is intentionally out of scope. If you need confidentiality, wrap the resulting file with <literal>std.crypto</literal> primitives or switch to formats like encrypted tarballs with age or minisign. <link xl:href="45__text-formatting-and-unicode.xml">45</link></simpara>
+</listitem>
+<listitem>
+<simpara>For multi-gigabyte corpora, read inputs in chunks and update CRC32 incrementally rather than calling <literal>readToEndAlloc</literal>; otherwise the temporary allocator will balloon. <link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

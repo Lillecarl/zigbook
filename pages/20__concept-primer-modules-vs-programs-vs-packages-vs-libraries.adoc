@@ -1,0 +1,382 @@
+////
+changes: ["Initial draft clarifying the vocabulary for modules, programs, packages, and libraries", "Added runnable demos for module classification and module registration flags"]
+examples_compile: yes
+keywords: ["modules", "packages", "programs", "libraries"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "21__zig-init-and-package-metadata"
+open_questions: []
+previous_chapter: "19__modules-and-imports-root-builtin-discovery"
+status: draft
+xref_complete: true
+////
+
+= Concept Primer: Modules vs Programs vs Packages vs Libraries
+:chapter-number: 20
+:chapter-slug: concept-primer-modules-vs-programs-vs-packages-vs-libraries
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+xref:19__modules-and-imports-root-builtin-discovery.adoc[Chapter 19] mapped the compiler’s module graph; this chapter names the roles those modules can play so you know when a file is merely a helper, when it graduates to a program, and when it becomes the nucleus of a reusable package or library.
+
+We will also preview how the Zig CLI registers modules for consumers, setting the stage for build graph authoring in xref:21__zig-init-and-package-metadata.adoc[Chapter 21] and in link:https://github.com/ziglang/zig/tree/master/lib/std/build.zig[build.zig].
+
+[[learning-goals]]
+== Learning Goals
+
+* Distinguish modules, programs, packages, and libraries, and explain how Zig treats each during compilation. 
+* Use the `--dep` and `-M` flags (and their build graph equivalents) to register named modules for consumers. 
+* Apply a practical checklist for picking the right unit when starting a new artifact or refactoring an existing one. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+
+[[vocabulary]]
+== Building a shared vocabulary
+
+**Before you wire build scripts or register dependencies, settle on consistent language:** In Zig, a *module* is any compilation unit returned by `@import`, a *program* is a module graph with an entry point, a *package* bundles modules plus metadata, and a *library* is a package intended for reuse without a root `main`.
+link:https://github.com/ziglang/zig/tree/master/lib/std/start.zig[start.zig]
+
+[[modules-programs]]
+=== Modules and programs in practice
+
+This demo starts with a root module that exports a manifest for a library but also declares `main`, so the runtime treats the graph as a program while the helper module introspects public symbols to keep terminology honest. xref:19__modules-and-imports-root-builtin-discovery.adoc[19] 
+
+[source,zig]
+----
+include::{sourcedir}/20__concept-primer-modules-vs-programs-vs-packages-vs-libraries/module_role_map.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run module_role_map.zig
+----
+
+.Output
+[source,shell]
+----
+== Module vocabulary demo ==
+root exports main? yes → treat as program
+root public surface: 3 declarations
+library 'widgetlib' v0.1.0 exports main? no
+library modules listed: 2
+intent cheat sheet:
+  - ship a CLI entry point → program
+  - publish reusable code → package + library
+  - share type definitions inside a workspace → module
+----
+
+TIP: Keep root exports minimal and document them in one place (`PublicSurface` here) so helper modules can reason about intent without relying on undocumented globals. 
+
+[[modules-programs-entrypoints]]
+=== Under the hood: entry points and programs
+
+Whether a module graph behaves as a program or a library depends on whether it ultimately exports an entry point symbol. `std.start` decides which symbol to export based on platform, link mode, and a few `builtin` fields, so the presence of `main` is only part of the story.
+
+==== Entry point symbol table
+
+|===
+| Platform | Link Mode | Conditions | Exported Symbol | Handler Function
+
+| POSIX/Linux
+| Executable
+| Default
+| `_start`
+| `_start()`
+
+| POSIX/Linux
+| Executable
+| Linking libc
+| `main`
+| `main()`
+
+| Windows
+| Executable
+| Default
+| `wWinMainCRTStartup`
+| `WinStartup()` / `wWinMainCRTStartup()`
+
+| Windows
+| Dynamic Library
+| Default
+| `_DllMainCRTStartup`
+| `_DllMainCRTStartup()`
+
+| UEFI
+| Executable
+| Default
+| `EfiMain`
+| `EfiMain()`
+
+| WASI
+| Executable (command)
+| Default
+| `_start`
+| `wasi_start()`
+
+| WASI
+| Executable (reactor)
+| Default
+| `_initialize`
+| `wasi_start()`
+
+| WebAssembly
+| Freestanding
+| Default
+| `_start`
+| `wasm_freestanding_start()`
+
+| WebAssembly
+| Linking libc
+| Default
+| `__main_argc_argv`
+| `mainWithoutEnv()`
+
+| OpenCL/Vulkan
+| Kernel
+| Default
+| `main`
+| `spirvMain2()`
+
+| MIPS
+| Any
+| Default
+| `__start`
+| (same as `_start`)
+|===
+
+*Sources:* link:https://github.com/ziglang/zig/tree/master/lib/std/start.zig[start.zig]
+
+==== Compile-time entry point logic
+
+At compile time, `std.start` runs a small decision tree over `builtin.output_mode`, `builtin.os`, `link_libc`, and the target architecture to export exactly one of the symbols above:
+
+[mermaid]
+....
+graph TB
+  Start["comptime block<br/>(start.zig:28)"]
+  CheckMode["Check builtin.output_mode"]
+  CheckSimplified["simplified_logic?<br/>(stage2 backends)"]
+
+  CheckLinkC["link_libc or<br/>object_format == .c?"]
+  CheckWindows["builtin.os == .windows?"]
+  CheckUEFI["builtin.os == .uefi?"]
+  CheckWASI["builtin.os == .wasi?"]
+  CheckWasm["arch.isWasm() &&<br/>os == .freestanding?"]
+
+  ExportMain["@export(&main, 'main')"]
+  ExportWinMain["@export(&WinStartup,<br/>'wWinMainCRTStartup')"]
+  ExportStart["@export(&_start, '_start')"]
+  ExportEfi["@export(&EfiMain, 'EfiMain')"]
+  ExportWasi["@export(&wasi_start,<br/>wasm_start_sym)"]
+  ExportWasmStart["@export(&wasm_freestanding_start,<br/>'_start')"]
+
+  Start --> CheckMode
+  CheckMode -->|".Exe or has main"| CheckSimplified
+  CheckSimplified -->|"true"| Simple["Simplified logic<br/>(lines 33-51)"]
+  CheckSimplified -->|"false"| CheckLinkC
+
+  CheckLinkC -->|"yes"| ExportMain
+  CheckLinkC -->|"no"| CheckWindows
+  CheckWindows -->|"yes"| ExportWinMain
+  CheckWindows -->|"no"| CheckUEFI
+  CheckUEFI -->|"yes"| ExportEfi
+  CheckUEFI -->|"no"| CheckWASI
+  CheckWASI -->|"yes"| ExportWasi
+  CheckWASI -->|"no"| CheckWasm
+  CheckWasm -->|"yes"| ExportWasmStart
+  CheckWasm -->|"no"| ExportStart
+....
+
+*Sources:* link:https://github.com/ziglang/zig/tree/master/lib/std/start.zig[lib/std/start.zig:28-100]
+
+[[library-manifests]]
+=== Library manifests and internal reuse
+
+The manifest recorded in `pkg/manifest.zig` models what eventually becomes package metadata: a name, semantic version, a list of modules, and an explicit statement that no entry point is exported. 
+
+[[packages]]
+== Packages as distribution contracts
+
+Packages are agreements between producers and consumers: producers register module names and expose metadata; consumers import those names without touching filesystem paths, trusting the build graph to supply the right code. 
+
+[[registering-modules]]
+=== Registering modules with -M and --dep
+
+Zig 0.15.2 replaces legacy `--pkg-begin/--pkg-end` syntax with `-M` (module definition) and `--dep` (import table entry), mirroring what `std.build` does when it wires workspaces (see link:https://github.com/ziglang/zig/tree/master/lib/std/Build.zig[Build.zig]).
+
+[source,zig]
+----
+include::{sourcedir}/20__concept-primer-modules-vs-programs-vs-packages-vs-libraries/package_overlay_demo.zig[]
+----
+
+[source,zig]
+----
+include::{sourcedir}/20__concept-primer-modules-vs-programs-vs-packages-vs-libraries/overlay_widget.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig build-exe --dep overlay -Mroot=package_overlay_demo.zig -Moverlay=overlay_widget.zig -femit-bin=overlay_demo && ./overlay_demo
+----
+
+.Output
+[source,shell]
+----
+registered package: overlay
+role advertised: library package
+optimize mode: Debug
+target os: linux
+resolved module namespace: overlay → pub decls: 2
+----
+
+IMPORTANT: `--dep overlay` must precede the module declaration that consumes it; otherwise the import table stays empty and the compiler cannot resolve `@import("overlay")`.footnote:[`--dep` writes the dependency list for the next `-M` entry, mirroring how `std.build.Module.addImport` queues dependencies before the module materializes.]
+
+==== Case study: compiler bootstrap command
+
+The Zig compiler itself is built using the same `-M`/`--dep` machinery. During the bootstrap from `zig1` to `zig2`, the command line wires multiple named modules and their dependencies:
+
+----
+zig1 <lib-dir> build-exe -ofmt=c -lc -OReleaseSmall \
+  --name zig2 \
+  -femit-bin=zig2.c \
+  -target <host-triple> \
+  --dep build_options \
+  --dep aro \
+  -Mroot=src/main.zig \
+  -Mbuild_options=config.zig \
+  -Maro=lib/compiler/aro/aro.zig
+----
+
+Here, each `--dep` line queues a dependency for the next `-M` module declaration, just like in the small overlay demo but at compiler scale.
+
+==== From CLI flags to build graph
+
+Once you move from ad-hoc `zig build-exe` commands to a `build.zig` file, the same concepts reappear as `std.Build` and `std.Build.Module` nodes in a build graph. The diagram below summarizes how the native build system's entry point wires compiler compilation, tests, docs, and installation.
+
+[mermaid]
+....
+graph TB
+  subgraph "Build Entry Point"
+    BUILD_FN["build(b: *std.Build)"] --> OPTIONS["Parse Build Options"]
+    OPTIONS --> COMPILER["addCompilerStep()"]
+    OPTIONS --> TEST_SETUP["Test Suite Setup"]
+    OPTIONS --> DOCS["Documentation Steps"]
+  end
+
+  subgraph "Compiler Compilation"
+    COMPILER --> EXE["std.Build.CompileStep<br/>(zig executable)"]
+    EXE --> COMPILER_MOD["addCompilerMod()"]
+    EXE --> BUILD_OPTIONS["build_options<br/>(generated config)"]
+    EXE --> LLVM_INTEGRATION["LLVM/Clang/LLD<br/>linking"]
+  end
+
+  subgraph "Test Steps"
+    TEST_SETUP --> TEST_CASES["test-cases<br/>tests.addCases()"]
+    TEST_SETUP --> TEST_MODULES["test-modules<br/>tests.addModuleTests()"]
+    TEST_SETUP --> TEST_UNIT["test-unit<br/>compiler unit tests"]
+    TEST_SETUP --> TEST_STANDALONE["test-standalone"]
+    TEST_SETUP --> TEST_CLI["test-cli"]
+  end
+
+  subgraph "Documentation"
+    DOCS --> LANGREF_GEN["generateLangRef()<br/>(tools/docgen.zig)"]
+    DOCS --> STD_DOCS["autodoc_test<br/>(lib/std/std.zig)"]
+  end
+
+  subgraph "Installation"
+    EXE --> INSTALL_BIN["stage3/bin/zig"]
+    INSTALL_LIB_DIR["lib/ directory"] --> INSTALL_LIB_TARGET["stage3/lib/zig/"]
+    LANGREF_GEN --> INSTALL_LANGREF["stage3/doc/langref.html"]
+    STD_DOCS --> INSTALL_STD_DOCS["stage3/doc/std/"]
+  end
+....
+
+[[package-intent]]
+=== Documenting package intent
+
+Beyond the CLI flags, intent lives in documentation: describe which modules are public, whether you expect downstream entry points, and how the package should be consumed by other build graphs (see link:https://github.com/ziglang/zig/tree/master/lib/std/Build/Module.zig[Module.zig]).
+
+[[choosing-unit]]
+== Choosing the right unit fast
+
+Use the cheat sheet below when deciding what to create next; it is intentionally opinionated so teams develop shared defaults. xref:19__modules-and-imports-root-builtin-discovery.adoc[19] 
+
+[cols="1,1,1",options="header"]
+|===
+| You want to… | Prefer | Rationale
+| Publish reusable algorithms with no entry point | Package + library | Bundle modules with metadata so consumers can import by name and stay decoupled from paths. 
+| Ship a command-line tool | Program | Export a `main` (or `_start`) and keep helper modules private unless you intend to share them. 
+| Share types across files inside one repo | Module | Use plain `@import` to expose namespaces without coupling build metadata prematurely. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+|===
+
+=== Artifact types at a glance
+
+The compiler's `output_mode` and `link_mode` choices determine the concrete artifact form that backs each conceptual role. Programs usually build as executables, while libraries use `Lib` outputs that can be static or dynamic.
+
+[mermaid]
+....
+graph LR
+  subgraph "Output Mode + Link Mode = Artifact Type"
+    Exe_static["output_mode: Exe<br/>link_mode: static"] --> ExeStatic["Static executable"]
+    Exe_dynamic["output_mode: Exe<br/>link_mode: dynamic"] --> ExeDynamic["Dynamic executable"]
+
+    Lib_static["output_mode: Lib<br/>link_mode: static"] --> LibStatic["Static library (.a)"]
+    Lib_dynamic["output_mode: Lib<br/>link_mode: dynamic"] --> LibDynamic["Shared library (.so/.dll)"]
+
+    Obj["output_mode: Obj<br/>link_mode: N/A"] --> ObjFile["Object file (.o)"]
+  end
+....
+
+*Sources:* link:https://github.com/ziglang/zig/tree/master/src/Compilation/Config.zig[Config.zig], link:https://github.com/ziglang/zig/tree/master/src/main.zig[main.zig], link:https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig[builtin.zig]
+
+You can combine the vocabulary from this chapter with these artifact types using a simple mapping:
+
+[cols="1,1,2",options="header"]
+|===
+| Role | Typical artifact | Notes
+| Program | `output_mode: Exe` (static or dynamic) | Exposes an entry point; may also export helper modules internally.
+| Library package | `output_mode: Lib` (static or shared) | Intended for reuse; no root `main`, consumers import modules by name.
+| Internal module | Depends on context | Often compiled as part of an executable or library; exposed via `@import` rather than a standalone artifact.
+|===
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Record manifest-like data even in ad-hoc modules so later promotion to a package is mechanical. 
+* When you convert a program into a library, delete or guard the entry point; otherwise consumers get conflicting roots. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+* The `-M`/`--dep` workflow is a thin veneer over `std.build.Module`, so prefer the build graph once your project exceeds a single binary. xref:21__zig-init-and-package-metadata.adoc[21]
+
+[[exercises]]
+== Exercises
+
+* Extend `module_role_map.zig` so the cheat sheet is driven by data loaded from a JSON manifest, then compare the ergonomics with direct Zig structs. xref:12__config-as-data.adoc[12], link:https://github.com/ziglang/zig/tree/master/lib/std/json.zig[json.zig]
+* Modify the overlay demo to register two external modules and emit their declaration counts, reinforcing how `--dep` queues multiple imports. 
+* Draft a `zig build` script that wraps the overlay example, verifying that the CLI flags map cleanly to `b.addModule` and `module.addImport`. xref:21__zig-init-and-package-metadata.adoc[21]
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, alternatives, edge cases
+
+* Cross-compiling packages may expose `target`-specific modules; document conditional imports to prevent surprise name resolution failures. 
+* If you register a module name twice in the same build graph, the zig CLI reports a collision—treat that as a signal to refactor rather than relying on ordering. xref:19__modules-and-imports-root-builtin-discovery.adoc[19]
+* Some tooling still expects the deprecated `--pkg-begin` syntax; upgrade scripts in tandem with the compiler to keep dependency registration consistent. link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]

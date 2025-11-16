@@ -1,0 +1,183 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom code block styling */
+pre[class*="language-"] {
+  @apply my-4 text-sm leading-relaxed;
+  background-color: transparent;
+}
+
+code[class*="language-"] {
+  @apply text-sm;
+}
+
+/* Prism token theming tuned to Zigbook (works in both themes) */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  @apply text-base-content/60;
+}
+
+.token.punctuation {
+  @apply text-base-content/80;
+}
+
+.token.property,
+.token.tag,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  @apply text-error;
+}
+
+.token.boolean,
+.token.number {
+  @apply text-warning;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  @apply text-success;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+  @apply text-info;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  @apply text-primary;
+}
+
+.token.function,
+.token.class-name {
+  @apply text-accent;
+}
+
+/* Inline code */
+:not(pre)>code {
+  @apply font-mono text-xs px-1.5 py-0.5 rounded-md bg-base-300/60 text-base-content;
+}
+
+/* Chapter prose styling */
+.prose-zigbook {
+  @apply text-base leading-relaxed text-base-content;
+}
+
+.prose-zigbook p {
+  @apply mb-4;
+}
+
+.prose-zigbook ul,
+.prose-zigbook ol {
+  @apply mb-4 ml-6;
+}
+
+.prose-zigbook a {
+  position: relative;
+  text-decoration: none;
+}
+
+.prose-zigbook a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -0.15em;
+  width: 0;
+  height: 1px;
+  background-color: currentColor;
+  transition: width 150ms ease-out;
+}
+
+.prose-zigbook a:hover::after {
+  width: 100%;
+}
+
+.prose-heading {
+  @apply text-2xl sm:text-3xl font-semibold tracking-tight text-base-content;
+}
+
+.prose-subheading {
+  @apply text-xl sm:text-2xl font-semibold text-base-content;
+}
+
+.chapter-table {
+  @apply w-full text-sm;
+}
+
+.chapter-table thead tr {
+  @apply bg-base-100/90;
+}
+
+.chapter-table thead th {
+  @apply font-semibold text-base-content;
+}
+
+.chapter-table tbody tr:nth-child(even) {
+  @apply bg-base-200/40;
+}
+
+.chapter-table tbody tr:hover {
+  @apply bg-base-200/70;
+}
+
+/* Floating animation for logo */
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-20px);
+  }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Hero background orbital motion */
+@keyframes hero-orbit {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.hero-orbit-slow {
+  animation: hero-orbit 36s linear infinite;
+  transform-origin: center;
+}
+
+.hero-orbit-slower {
+  animation: hero-orbit 52s linear infinite reverse;
+  transform-origin: center;
+}
+
+/* Respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  .animate-float {
+    animation: none !important;
+  }
+
+  .hero-orbit-slow,
+  .hero-orbit-slower {
+    animation: none !important;
+  }
+}

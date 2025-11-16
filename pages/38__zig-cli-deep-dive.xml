@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Zig CLI Deep Dive</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>We spent the previous chapter hardening invariants and fail-fast strategies (see <link xl:href="37__illegal-behavior-and-safety-modes.xml">37</link>); now we turn that discipline toward the tooling that drives every Zig project. The <literal>zig</literal> command-line interface (CLI) is more than a compiler wrapper: it dispatches to build graph runners, drop-in toolchain shims, formatting pipelines, and metadata exporters that keep your codebase reproducible. See <link xl:href="ZIG_DEEP_WIKI.md#entry-points-and-command-structure">#entry points and command structure</link>.</simpara>
+<simpara>The insights you gather here will feed directly into the upcoming performance tuning discussion, where CLI flags like <literal>-OReleaseFast</literal> and <literal>--time-report</literal> become essential measurement levers (see <link xl:href="39__performance-and-inlining.xml">39</link>).</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Map the major command families exposed by the <literal>zig</literal> CLI and know when to reach for each.</simpara>
+</listitem>
+<listitem>
+<simpara>Drive compilation, testing, and sanitizers from the CLI while keeping outputs reproducible across targets.</simpara>
+</listitem>
+<listitem>
+<simpara>Combine diagnostic commands—<literal>fmt</literal>, <literal>ast-check</literal>, <literal>env</literal>, <literal>targets</literal>—into daily workflows that surface correctness issues early.</simpara>
+</listitem>
+</itemizedlist>
+<simpara><emphasis>Refs: <link xl:href="https://ziglang.org/documentation/master/#Command-line-flags">#Command-line-flags</link></emphasis></simpara>
+</chapter>
+<chapter xml:id="cli-topology">
+<title>Command Map of the <literal>zig</literal> Tool</title>
+<simpara>Zig ships a single binary whose first positional argument selects the subsystem to execute. Understanding that dispatch table is the fastest route to mastering the CLI.</simpara>
+<programlisting language="markdown" linenumbering="unnumbered">Unresolved directive in 38__zig-cli-deep-dive.adoc - include::example$chapters-data/code/38__zig-cli-deep-dive/zig-help.md[]</programlisting>
+<section xml:id="cli-build-execute">
+<title>Build and Execution Commands</title>
+<simpara>Compilation-centric commands (<literal>build-exe</literal>, <literal>build-lib</literal>, <literal>build-obj</literal>, <literal>run</literal>, <literal>test</literal>, <literal>test-obj</literal>) all flow through the same build output machinery, offering consistent options for targets, optimization, sanitizers, and emission controls. <literal>zig test-obj</literal> (new in 0.15.2) now emits object files for embed-your-own test runners when you need to integrate with foreign harnesses (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html#compile-tests-to-object-file">#compile tests to object file</link>).</simpara>
+</section>
+<section xml:id="cli-toolchain-dropin">
+<title>Toolchain Drop-in Modes</title>
+<simpara><literal>zig cc</literal>, <literal>zig c++</literal>, <literal>zig ar</literal>, <literal>zig dlltool</literal>, and friends let you replace Clang/LLVM utilities with Zig-managed shims, keeping cross-compilation assets, libc headers, and target triples consistent without juggling SDK installs. These commands honor the same cache directories you see in <literal>zig env</literal>, so the artifacts they produce land beside your native Zig outputs.</simpara>
+</section>
+<section xml:id="cli-package-init">
+<title>Package Bootstrapping Commands</title>
+<simpara><literal>zig init</literal> and <literal>zig fetch</literal> handle project scaffolding and dependency pinning. Version 0.15.2 introduces <literal>zig init --minimal</literal>, which generates just a <literal>build.zig</literal> stub plus a valid <literal>build.zig.zon</literal> fingerprint for teams that already know how they want the build graph structured (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html#zig-init">#zig init</link>). Combined with <literal>zig fetch</literal>, you can warm the global cache before CI kicks off, avoiding first-run latency when <literal>zig build</literal> pulls modules from the package manager.</simpara>
+</section>
+</chapter>
+<chapter xml:id="cli-driving-compilation">
+<title>Driving Compilation from the CLI</title>
+<simpara>Once you know which command to call, the art lies in selecting the right flags and reading the metadata they surface. Zig&#8217;s CLI mirrors the language&#8217;s explicitness: every safety toggle and artifact knob is rendered as a flag, and the <literal>@import("builtin")</literal> namespace reflects back what the build saw.</simpara>
+<section xml:id="cli-run-summary">
+<title>Inspecting Build Context with <literal>zig run</literal></title>
+<simpara>The <literal>zig run</literal> wrapper accepts all compilation flags plus a <literal>--</literal> separator that forwards the remaining arguments to your program. This makes it ideal for quick experiments that still need deterministic target and optimization settings.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 38__zig-cli-deep-dive.adoc - include::example$chapters-data/code/38__zig-cli-deep-dive/01_cli_modes.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 01_cli_modes.zig -OReleaseFast -- --name zig --count 2</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">optimize-mode: ReleaseFast
+target-triple: x86_64-linux-gnu
+single-threaded: false
+user-args:
+  arg[0] = --name
+  arg[1] = zig
+  arg[2] = --count
+  arg[3] = 2</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Pair <literal>zig run</literal> with <literal>-fsanitize-c=trap</literal> or <literal>-fsanitize-c=full</literal> to toggle UBSan-style diagnostics without touching source. These flags mirror the new module-level sanitizer controls added in 0.15.2 (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html#allow-configuring-ubsan-mode-at-the-module-level">#allow configuring ubsan mode at the module level</link>).</simpara>
+</tip>
+</section>
+<section xml:id="cli-test-filter">
+<title>Filtering Test Suites on Demand</title>
+<simpara><literal>zig test</literal> accepts <literal>--test-filter</literal> to restrict which test names are compiled and executed, enabling tight edit-run loops even in monolithic suites. Combine it with <literal>--summary all</literal> or <literal>--summary failing</literal> when you need deterministic reporting in CI pipelines.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 38__zig-cli-deep-dive.adoc - include::example$chapters-data/code/38__zig-cli-deep-dive/02_cli_tests.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 02_cli_tests.zig --test-filter sum</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>When your build graph emits <literal>zig test-obj</literal>, reuse the same filters. The command <literal>zig build test-obj --test-filter sum</literal> forwards them to the underlying runner in exactly the same way.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="cli-long-running">
+<title>Long-Running Builds and Reporting</title>
+<simpara>Large projects often keep <literal>zig build</literal> running continuously, so understanding its watch mode, web UI, and reporting hooks pays dividends. macOS users finally get reliable file watching in 0.15.2 thanks to a rewritten <literal>--watch</literal> implementation (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html#macos-file-system-watching">#macos file system watching</link>). Pair it with incremental compilation (<literal>-fincremental</literal>) to turn rebuilds into sub-second operations when files change.</simpara>
+<section xml:id="cli-webui">
+<title>Web Interface and Time Reports</title>
+<simpara><literal>zig build --webui</literal> spins up a local dashboard that visualizes the build graph, active steps, and, when combined with <literal>--time-report</literal>, a breakdown of semantic analysis and code generation hotspots (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html#web-interface-and-time-report">#web interface and time report</link>). Use it when you suspect slow compile times: the "Declarations" table highlights which files or declarations consume the most analysis time, and those insights flow directly into the optimization work covered in the next chapter (see <link xl:href="39__performance-and-inlining.xml">39</link>).</simpara>
+</section>
+</chapter>
+<chapter xml:id="cli-diagnostics">
+<title>Diagnostics and Automation Helpers</title>
+<simpara>Beyond compiling programs, the CLI offers tools that keep your repository tidy and introspectable: formatters, AST validators, environment reporters, and target enumerators (see <link xl:href="ZIG_DEEP_WIKI.md#formatter-zig-fmt">#formatter zig fmt</link>).</simpara>
+<section xml:id="cli-ast-check">
+<title>Batch Syntax Validation with <literal>zig ast-check</literal></title>
+<simpara><literal>zig ast-check</literal> parses files without emitting binaries, catching syntax and import issues faster than a full compile. This is handy for editor save hooks or pre-commit checks. The helper below returns cache and formatting defaults that build scripts can reuse; running <literal>ast-check</literal> against it ensures the file stays well-formed even if no executable ever imports it.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 38__zig-cli-deep-dive.adoc - include::example$chapters-data/code/38__zig-cli-deep-dive/03_cli_astcheck.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig ast-check 03_cli_astcheck.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">(no output)</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Combine <literal>zig ast-check</literal> with <literal>zig fmt --check --ast-check</literal> to refuse commits that either violate style or fail to parse—the formatter already has an AST pass under the hood, so the extra flag keeps both stages in sync.</simpara>
+</tip>
+</section>
+<section xml:id="cli-env-targets">
+<title>Introspection Commands Worth Scripting</title>
+<simpara><literal>zig env</literal> prints the paths, cache directories, and active target triple that the toolchain resolved, making it a perfect snapshot to capture in bug reports or CI logs. <literal>zig targets</literal> returns exhaustive architecture/OS/ABI matrices, which you can feed into <literal>std.build</literal> matrices to precompute release artifacts. Together they replace brittle environment variables with a single source of truth.</simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Prefer <literal>zig build --build-file &lt;path&gt;</literal> over copying projects into scratch directories; it lets you experiment with CLI options against isolated build graphs while keeping cache entries deterministic.</simpara>
+</listitem>
+<listitem>
+<simpara>macOS users still need to grant file system permissions for <literal>--watch</literal>. Without them, the builder falls back to polling and loses the new responsiveness in 0.15.2.</simpara>
+</listitem>
+<listitem>
+<simpara>Time reports can surface plenty of data. Capture them alongside sanitized builds so you know whether costly declarations are tied to debug assertions or optimizer work.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Script <literal>zig env</literal> before and after <literal>zig fetch</literal> to verify the cache paths you rely on in CI remain unchanged across Zig releases.</simpara>
+</listitem>
+<listitem>
+<simpara>Extend the <literal>zig ast-check</literal> sample to walk a directory tree, then wire it into a <literal>zig build</literal> custom step so <literal>zig build lint</literal> validates syntax without compiling. <link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>zig build --webui --time-report --watch</literal> on a medium project and record which declarations dominate the time report; refactor one hot declaration and re-run to quantify the improvement.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>zig run</literal> always produces build artifacts in the cache. If you need a hermetic sandbox, favor <literal>zig build-exe -femit-bin</literal> into a throwaway directory and run the binary manually.</simpara>
+</listitem>
+<listitem>
+<simpara>The CLI&#8217;s drop-in <literal>zig cc</literal> respects Zig&#8217;s idea of the sysroot. If you need the platform vendor toolchain verbatim, invoke <literal>clang</literal> directly to avoid surprising header selections.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>zig targets</literal> output can be enormous. Filter it with <literal>jq</literal> or <literal>grep</literal> before piping into build scripts so that your automation remains stable even if future releases add new fields.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

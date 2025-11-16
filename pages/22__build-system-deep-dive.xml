@@ -1,0 +1,632 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Build System Deep Dive</title>
+<subtitle><literal>build.zig</literal> &amp; <literal>std.Build</literal></subtitle>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Chapter 21 <link xl:href="21__zig-init-and-package-metadata.xml">21</link> showed how <literal>build.zig.zon</literal> declares package metadata; this chapter reveals how <literal>build.zig</literal> orchestrates compilation by authoring a directed acyclic graph of build steps using the <literal>std.Build</literal> API, which the build runner executes to produce artifacts—executables, libraries, tests, and custom transformations—while caching intermediate results and parallelizing independent work (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build.zig">Build.zig</link>).</simpara>
+<simpara>Unlike <literal>zig run</literal> or <literal>zig build-exe</literal>, which compile a single entry point imperatively, <literal>build.zig</literal> is executable Zig code that constructs a declarative build graph: nodes represent compilation steps, edges represent dependencies, and the build runner (<literal>zig build</literal>) traverses the graph optimally. For release details, see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Distinguish <literal>zig build</literal> (build graph execution) from <literal>zig run</literal> / <literal>zig build-exe</literal> (direct compilation).</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>b.standardTargetOptions()</literal> and <literal>b.standardOptimizeOption()</literal> to expose user-configurable target and optimization choices.</simpara>
+</listitem>
+<listitem>
+<simpara>Create modules with <literal>b.addModule()</literal> and <literal>b.createModule()</literal>, understanding when to expose modules publicly versus privately (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build/Module.zig">Module.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Build executables with <literal>b.addExecutable()</literal>, libraries with <literal>b.addLibrary()</literal>, and wire dependencies between artifacts (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build/Step/Compile.zig">Compile.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Integrate tests with <literal>b.addTest()</literal> and wire custom top-level steps with <literal>b.step()</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Debug build failures using <literal>zig build -v</literal> and interpret graph errors from missing modules or incorrect dependencies.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="build-zig-as-code">
+<title><literal>build.zig</literal> as Executable Zig Code</title>
+<simpara>Every <literal>build.zig</literal> exports a <literal>pub fn build(b: *std.Build)</literal> function that the build runner invokes after parsing <literal>build.zig.zon</literal> and setting up the build graph context; within this function, you use methods on the <literal>*std.Build</literal> pointer to register steps, artifacts, and dependencies declaratively. <link xl:href="21__zig-init-and-package-metadata.xml">21</link></simpara>
+<section xml:id="imperative-vs-declarative">
+<title>Imperative Commands vs. Declarative Graph</title>
+<simpara>When you run <literal>zig run main.zig</literal>, the compiler immediately compiles <literal>main.zig</literal> and executes it—a single-shot imperative workflow. When you run <literal>zig build</literal>, the runner first executes <literal>build.zig</literal> to construct a graph of steps, then analyzes that graph to determine which steps need to run (based on cache state and dependencies), and finally executes those steps in parallel where possible.</simpara>
+<simpara>This declarative approach enables:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Incremental builds</emphasis>: unchanged artifacts are not recompiled</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Parallel execution</emphasis>: independent steps run simultaneously</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Reproducibility</emphasis>: the same graph produces the same outputs</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Extensibility</emphasis>: custom steps integrate seamlessly</simpara>
+</listitem>
+</itemizedlist>
+<simpara><link xl:href="https://github.com/ziglang/zig/blob/master/lib/init/build.zig">build.zig template</link></simpara>
+</section>
+<section xml:id="minimal-build">
+<title>Minimal <literal>build.zig</literal></title>
+<simpara>The simplest <literal>build.zig</literal> creates one executable and installs it:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/01_minimal/build.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/01_minimal/main.zig[]</programlisting>
+<formalpara>
+<title>Build and run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build
+$ ./zig-out/bin/hello</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Hello from minimal build!</programlisting>
+</para>
+</formalpara>
+<simpara>This example hard-codes <literal>b.graph.host</literal> (the machine running the build) as the target and <literal>.Debug</literal> optimization, so users cannot customize it. For real projects, expose these as options.</simpara>
+<important>
+<simpara>The <literal>build</literal> function does not compile anything itself—it only registers steps in the graph. The build runner executes the graph after <literal>build()</literal> returns.</simpara>
+</important>
+</section>
+</chapter>
+<chapter xml:id="standard-options">
+<title>Standard Options Helpers</title>
+<simpara>Most projects want users to control the target architecture/OS and optimization level; <literal>std.Build</literal> provides two helpers that expose these as CLI flags and handle defaults gracefully.</simpara>
+<section xml:id="standard-target-options">
+<title><literal>standardTargetOptions()</literal>: Cross-Compilation Made Easy</title>
+<simpara><literal>b.standardTargetOptions(.{})</literal> returns a <literal>std.Build.ResolvedTarget</literal> that respects the <literal>-Dtarget=</literal> flag, allowing users to cross-compile without modifying <literal>build.zig</literal>:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build -Dtarget=x86_64-linux       # Linux x86_64
+$ zig build -Dtarget=aarch64-macos      # macOS ARM64
+$ zig build -Dtarget=wasm32-wasi        # WebAssembly WASI</programlisting>
+<simpara>The empty options struct <literal>(.{})</literal> accepts defaults; you can optionally whitelist targets or specify a fallback:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">const target = b.standardTargetOptions(.{
+    .default_target = .{ .cpu_arch = .x86_64, .os_tag = .linux },
+});</programlisting>
+</section>
+<section xml:id="standard-optimize-options">
+<title><literal>standardOptimizeOption()</literal>: User-Controlled Optimization</title>
+<simpara><literal>b.standardOptimizeOption(.{})</literal> returns a <literal>std.builtin.OptimizeMode</literal> that respects the <literal>-Doptimize=</literal> flag, with values <literal>.Debug</literal>, <literal>.ReleaseSafe</literal>, <literal>.ReleaseFast</literal>, or <literal>.ReleaseSmall</literal>:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build                             # Debug (default)
+$ zig build -Doptimize=ReleaseFast      # Maximum speed
+$ zig build -Doptimize=ReleaseSmall     # Minimum size</programlisting>
+<simpara>The options struct accepts a <literal>.preferred_optimize_mode</literal> to suggest a default when the user doesn&#8217;t specify one. If you pass no preference, the system infers from the package&#8217;s <literal>release_mode</literal> setting in <literal>build.zig.zon</literal>. <link xl:href="21__zig-init-and-package-metadata.xml">21</link></simpara>
+<simpara>Under the hood, the chosen <literal>OptimizeMode</literal> feeds into the compiler&#8217;s configuration and affects safety checks, debug information, and backend optimization levels:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Optimization Mode Effects"
+        OptMode["optimize_mode: OptimizeMode"]
+
+        OptMode --&gt; SafetyChecks["Runtime Safety Checks"]
+        OptMode --&gt; DebugInfo["Debug Information"]
+        OptMode --&gt; CodegenStrategy["Codegen Strategy"]
+        OptMode --&gt; LLVMOpt["LLVM Optimization Level"]
+
+        SafetyChecks --&gt; Overflow["Integer overflow checks"]
+        SafetyChecks --&gt; Bounds["Bounds checking"]
+        SafetyChecks --&gt; Null["Null pointer checks"]
+        SafetyChecks --&gt; Unreachable["Unreachable assertions"]
+
+        DebugInfo --&gt; StackTraces["Stack traces"]
+        DebugInfo --&gt; DWARF["DWARF debug info"]
+        DebugInfo --&gt; LineInfo["Source line information"]
+
+        CodegenStrategy --&gt; Inlining["Inline heuristics"]
+        CodegenStrategy --&gt; Unrolling["Loop unrolling"]
+        CodegenStrategy --&gt; Vectorization["SIMD vectorization"]
+
+        LLVMOpt --&gt; O0["Debug: -O0"]
+        LLVMOpt --&gt; O2Safe["ReleaseSafe: -O2 + safety"]
+        LLVMOpt --&gt; O3["ReleaseFast: -O3"]
+        LLVMOpt --&gt; Oz["ReleaseSmall: -Oz"]
+    end</literallayout>
+<simpara>This is the same <literal>OptimizeMode</literal> that <literal>b.standardOptimizeOption()</literal> returns, so the flags you expose in <literal>build.zig</literal> directly determine which safety checks remain enabled and which optimization pipeline the compiler selects.</simpara>
+</section>
+<section xml:id="configurable-example">
+<title>Complete Example with Standard Options</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/02_standard_options/build.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/02_standard_options/main.zig[]</programlisting>
+<formalpara>
+<title>Build and run with options</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build -Dtarget=x86_64-linux -Doptimize=ReleaseFast run</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output (example)</title>
+<para>
+<screen>Target: x86_64-linux
+Optimize: ReleaseFast</screen>
+</para>
+</formalpara>
+<tip>
+<simpara>Always use <literal>standardTargetOptions()</literal> and <literal>standardOptimizeOption()</literal> unless you have a very specific reason to hard-code values (e.g., firmware targeting a fixed embedded system).</simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="modules-and-imports">
+<title>Modules: Public and Private</title>
+<simpara>Zig 0.15.2 distinguishes <emphasis role="strong">public modules</emphasis> (exposed to consumers via <literal>b.addModule()</literal>) from <emphasis role="strong">private modules</emphasis> (internal to the current package, created with <literal>b.createModule()</literal>). Public modules appear in downstream <literal>build.zig</literal> files via <literal>b.dependency()</literal>, while private modules exist only within your build graph.</simpara>
+<section xml:id="add-module-vs-create-module">
+<title><literal>addModule</literal> vs. <literal>createModule</literal></title>
+<itemizedlist>
+<listitem>
+<simpara><literal>b.addModule(name, options)</literal> creates a module and registers it in the package&#8217;s public module table, making it available to consumers who depend on this package.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>b.createModule(options)</literal> creates a module without exposing it; useful for executable-specific code or internal helpers.</simpara>
+</listitem>
+</itemizedlist>
+<simpara>Both functions return a <literal>*std.Build.Module</literal>, which you wire into compilation steps via the <literal>.imports</literal> field.</simpara>
+</section>
+<section xml:id="module-example">
+<title>Example: Public Module and Executable</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/03_modules/build.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/03_modules/math.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/03_modules/main.zig[]</programlisting>
+<formalpara>
+<title>Build and run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">10 + 20 = 30
+10 * 20 = 200</programlisting>
+</para>
+</formalpara>
+<simpara>Here <literal>math</literal> is a <emphasis role="strong">public module</emphasis> (consumers of this package can <literal>@import("math")</literal>), while the executable&#8217;s root module is <emphasis role="strong">private</emphasis> (created with <literal>createModule</literal>).</simpara>
+<note>
+<simpara>The <literal>.imports</literal> field in <literal>Module.CreateOptions</literal> is a slice of <literal>.{ .name = &#8230;&#8203;, .module = &#8230;&#8203; }</literal> pairs, allowing you to map arbitrary import names to module pointers—useful for avoiding name collisions when consuming multiple packages.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="artifacts">
+<title>Artifacts: Executables, Libraries, Objects</title>
+<simpara>An <emphasis role="strong">artifact</emphasis> is a compile step that produces a binary output: an executable, a static or dynamic library, or an object file. The <literal>std.Build</literal> API provides <literal>addExecutable()</literal>, <literal>addLibrary()</literal>, and <literal>addObject()</literal> functions that return <literal>*Step.Compile</literal> pointers.</simpara>
+<section xml:id="add-executable">
+<title><literal>addExecutable()</literal>: Building Programs</title>
+<simpara><literal>b.addExecutable(.{ .name = &#8230;&#8203;, .root_module = &#8230;&#8203; })</literal> creates a <literal>Step.Compile</literal> that links a <literal>main</literal> function (or <literal>_start</literal> for freestanding) into an executable:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">const exe = b.addExecutable(.{
+    .name = "myapp",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    }),
+});
+b.installArtifact(exe);</programlisting>
+<itemizedlist>
+<listitem>
+<simpara><literal>.name</literal>: The output filename (e.g., <literal>myapp.exe</literal> on Windows, <literal>myapp</literal> on Unix).</simpara>
+</listitem>
+<listitem>
+<simpara><literal>.root_module</literal>: The module containing the entry point.</simpara>
+</listitem>
+<listitem>
+<simpara>Optional: <literal>.version</literal>, <literal>.linkage</literal> (for PIE), <literal>.max_rss</literal>, <literal>.use_llvm</literal>, <literal>.use_lld</literal>, <literal>.zig_lib_dir</literal>.</simpara>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="add-library">
+<title><literal>addLibrary()</literal>: Static and Dynamic Libraries</title>
+<simpara><literal>b.addLibrary(.{ .name = &#8230;&#8203;, .root_module = &#8230;&#8203;, . linkage = &#8230;&#8203; })</literal> creates a library:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">const lib = b.addLibrary(.{
+    .name = "utils",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("utils.zig"),
+        .target = target,
+        .optimize = optimize,
+    }),
+    . linkage = .static, // or .dynamic
+    .version = .{ .major = 1, .minor = 0, .patch = 0 },
+});
+b.installArtifact(lib);</programlisting>
+<itemizedlist>
+<listitem>
+<simpara><literal>.linkage = .static</literal> produces a <literal>.a</literal> (Unix) or <literal>.lib</literal> (Windows) archive.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>.linkage = .dynamic</literal> produces a <literal>.so</literal> (Unix), <literal>.dylib</literal> (macOS), or <literal>.dll</literal> (Windows) shared library.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>.version</literal>: Semantic version embedded in the library metadata (Unix only).</simpara>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="linking-libraries">
+<title>Linking Libraries to Executables</title>
+<simpara>To link a library into an executable, call <literal>exe.linkLibrary(lib)</literal> after creating both artifacts:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/05_library/build.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/05_library/utils.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/05_library/main.zig[]</programlisting>
+<formalpara>
+<title>Build and run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">double(7) = 14
+square(7) = 49</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara>When linking a Zig library, symbols must be `export`ed (for C ABI) or you must use module imports—Zig does not have a linker-level "public Zig API" concept distinct from module exports.</simpara>
+</important>
+</section>
+<section xml:id="install-artifact">
+<title>Installing Artifacts: <literal>installArtifact()</literal></title>
+<simpara><literal>b.installArtifact(exe)</literal> adds a dependency on the default install step (<literal>zig build</literal> with no arguments) that copies the artifact to <literal>zig-out/bin/</literal> (executables) or <literal>zig-out/lib/</literal> (libraries). You can customize the install directory or skip installation entirely if the artifact is intermediate-only.</simpara>
+</section>
+</chapter>
+<chapter xml:id="tests-and-test-steps">
+<title>Tests and Test Steps</title>
+<simpara>Zig&#8217;s test blocks integrate directly into the build system: <literal>b.addTest(.{ .root_module = &#8230;&#8203; })</literal> creates a special executable that runs all <literal>test</literal> blocks in the given module, reporting pass/fail to the build runner. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+<section xml:id="add-test">
+<title><literal>addTest()</literal>: Compiling Test Executables</title>
+<programlisting language="zig" linenumbering="unnumbered">const lib_tests = b.addTest(.{
+    .root_module = lib_mod,
+});
+
+const run_lib_tests = b.addRunArtifact(lib_tests);
+
+const test_step = b.step("test", "Run library tests");
+test_step.dependOn(&amp;run_lib_tests.step);</programlisting>
+<simpara><literal>b.addTest()</literal> returns a <literal>*Step.Compile</literal> just like <literal>addExecutable()</literal>, but it compiles the module in test mode, linking the test runner and enabling test-only code paths.</simpara>
+</section>
+<section xml:id="test-example">
+<title>Complete Test Integration Example</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/04_tests/build.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/04_tests/lib.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/04_tests/main.zig[]</programlisting>
+<formalpara>
+<title>Run tests</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build test</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output (success)</title>
+<para>
+<screen>All 3 tests passed.</screen>
+</para>
+</formalpara>
+<tip>
+<simpara>Create separate test steps for each module to isolate failures and enable parallel test execution.</simpara>
+</tip>
+<simpara><emphasis>To see how this scales up in a large codebase, the Zig compiler&#8217;s own <literal>build.zig</literal> wires many specialized test steps into a single umbrella <literal>test</literal> step:</emphasis></simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Test Steps"
+        TEST_STEP["test step&lt;br/&gt;(umbrella step)"]
+        FMT["test-fmt&lt;br/&gt;Format checking"]
+        CASES["test-cases&lt;br/&gt;Compiler test cases"]
+        MODULES["test-modules&lt;br/&gt;Per-target module tests"]
+        UNIT["test-unit&lt;br/&gt;Compiler unit tests"]
+        STANDALONE["Standalone tests"]
+        CLI["CLI tests"]
+        STACK_TRACE["Stack trace tests"]
+        ERROR_TRACE["Error trace tests"]
+        LINK["Link tests"]
+        C_ABI["C ABI tests"]
+        INCREMENTAL["test-incremental&lt;br/&gt;Incremental compilation"]
+    end
+
+    subgraph "Module Tests"
+        BEHAVIOR["behavior tests&lt;br/&gt;test/behavior.zig"]
+        COMPILER_RT["compiler_rt tests&lt;br/&gt;lib/compiler_rt.zig"]
+        ZIGC["zigc tests&lt;br/&gt;lib/c.zig"]
+        STD["std tests&lt;br/&gt;lib/std/std.zig"]
+        LIBC_TESTS["libc tests"]
+    end
+
+    subgraph "Test Configuration"
+        TARGET_MATRIX["test_targets array&lt;br/&gt;Different architectures&lt;br/&gt;Different OSes&lt;br/&gt;Different ABIs"]
+        OPT_MODES["Optimization modes:&lt;br/&gt;Debug, ReleaseFast&lt;br/&gt;ReleaseSafe, ReleaseSmall"]
+        FILTERS["test-filter&lt;br/&gt;test-target-filter"]
+    end
+
+    TEST_STEP --&gt; FMT
+    TEST_STEP --&gt; CASES
+    TEST_STEP --&gt; MODULES
+    TEST_STEP --&gt; UNIT
+    TEST_STEP --&gt; STANDALONE
+    TEST_STEP --&gt; CLI
+    TEST_STEP --&gt; STACK_TRACE
+    TEST_STEP --&gt; ERROR_TRACE
+    TEST_STEP --&gt; LINK
+    TEST_STEP --&gt; C_ABI
+    TEST_STEP --&gt; INCREMENTAL
+
+    MODULES --&gt; BEHAVIOR
+    MODULES --&gt; COMPILER_RT
+    MODULES --&gt; ZIGC
+    MODULES --&gt; STD
+
+    TARGET_MATRIX --&gt; MODULES
+    OPT_MODES --&gt; MODULES
+    FILTERS --&gt; MODULES</literallayout>
+<simpara>Your own projects can borrow this pattern: one high-level <literal>test</literal> step that fans out to format checks, unit tests, integration tests, and cross-target test matrices, all wired together using the same <literal>b.step</literal> and <literal>b.addTest</literal> primitives.</simpara>
+</section>
+</chapter>
+<chapter xml:id="top-level-steps">
+<title>Top-Level Steps: Custom Build Commands</title>
+<simpara>A <emphasis role="strong">top-level step</emphasis> is a named entry point that users invoke with <literal>zig build &lt;step-name&gt;</literal>. You create them with <literal>b.step(name, description)</literal> and wire dependencies using <literal>step.dependOn(other_step)</literal>.</simpara>
+<section xml:id="step-example">
+<title>Creating a <literal>run</literal> Step</title>
+<programlisting language="zig" linenumbering="unnumbered">const run_step = b.step("run", "Run the application");
+const run_cmd = b.addRunArtifact(exe);
+run_cmd.step.dependOn(b.getInstallStep());
+run_step.dependOn(&amp;run_cmd.step);</programlisting>
+<itemizedlist>
+<listitem>
+<simpara><literal>b.step("run", &#8230;&#8203;)</literal> creates the top-level step users invoke.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>b.addRunArtifact(exe)</literal> creates a step that executes the compiled binary.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>run_cmd.step.dependOn(b.getInstallStep())</literal> ensures the binary is installed before running it.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>run_step.dependOn(&amp;run_cmd.step)</literal> links the top-level step to the run command.</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This pattern appears in almost every <literal>zig init</literal>-generated <literal>build.zig</literal>.</simpara>
+<simpara><emphasis>In the Zig compiler&#8217;s own <literal>build.zig</literal>, the default install and test steps form a larger dependency graph:</emphasis></simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Installation Step (default)"
+        INSTALL["b.getInstallStep()"]
+    end
+
+    subgraph "Compiler Artifacts"
+        EXE_STEP["exe.step&lt;br/&gt;(compile compiler)"]
+        INSTALL_EXE["install_exe.step&lt;br/&gt;(install binary)"]
+    end
+
+    subgraph "Documentation"
+        LANGREF["generateLangRef()"]
+        INSTALL_LANGREF["install_langref.step"]
+        STD_DOCS_GEN["autodoc_test"]
+        INSTALL_STD_DOCS["install_std_docs.step"]
+    end
+
+    subgraph "Library Files"
+        LIB_FILES["installDirectory(lib/)"]
+    end
+
+    subgraph "Test Steps"
+        TEST["test step"]
+        FMT["test-fmt step"]
+        CASES["test-cases step"]
+        MODULES["test-modules step"]
+    end
+
+    INSTALL --&gt; INSTALL_EXE
+    INSTALL --&gt; INSTALL_LANGREF
+    INSTALL --&gt; LIB_FILES
+
+    INSTALL_EXE --&gt; EXE_STEP
+    INSTALL_LANGREF --&gt; LANGREF
+    INSTALL --&gt; INSTALL_STD_DOCS
+    INSTALL_STD_DOCS --&gt; STD_DOCS_GEN
+
+    TEST --&gt; EXE_STEP
+    TEST --&gt; FMT
+    TEST --&gt; CASES
+    TEST --&gt; MODULES
+
+    CASES --&gt; EXE_STEP
+    MODULES --&gt; EXE_STEP</literallayout>
+<simpara>Running <literal>zig build</literal> (with no explicit step) typically executes a default install step like this, while <literal>zig build test</literal> executes a dedicated test step that depends on the same core compile actions.</simpara>
+<simpara><emphasis>To place this chapter in the wider Zig toolchain, the compiler&#8217;s own bootstrap process uses CMake to produce an intermediate <literal>zig2</literal> executable, then invokes <literal>zig2 build</literal> on its native <literal>build.zig</literal> script:</emphasis></simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "CMake Stage (stage2)"
+        CMAKE["CMake"]
+        ZIG2_C["zig2.c&lt;br/&gt;(generated C code)"]
+        ZIGCPP["zigcpp&lt;br/&gt;(C++ LLVM/Clang wrapper)"]
+        ZIG2["zig2 executable"]
+
+        CMAKE --&gt; ZIG2_C
+        CMAKE --&gt; ZIGCPP
+        ZIG2_C --&gt; ZIG2
+        ZIGCPP --&gt; ZIG2
+    end
+
+    subgraph "Native Build System (stage3)"
+        BUILD_ZIG["build.zig&lt;br/&gt;Native Build Script"]
+        BUILD_FN["build() function"]
+        COMPILER_STEP["addCompilerStep()"]
+        EXE["std.Build.Step.Compile&lt;br/&gt;(compiler executable)"]
+        INSTALL["Installation Steps"]
+
+        BUILD_ZIG --&gt; BUILD_FN
+        BUILD_FN --&gt; COMPILER_STEP
+        COMPILER_STEP --&gt; EXE
+        EXE --&gt; INSTALL
+    end
+
+    subgraph "Build Arguments"
+        ZIG_BUILD_ARGS["ZIG_BUILD_ARGS&lt;br/&gt;--zig-lib-dir&lt;br/&gt;-Dversion-string&lt;br/&gt;-Dtarget&lt;br/&gt;-Denable-llvm&lt;br/&gt;-Doptimize"]
+    end
+
+    ZIG2 --&gt;|"zig2 build"| BUILD_ZIG
+    ZIG_BUILD_ARGS --&gt; BUILD_FN
+
+    subgraph "Output"
+        STAGE3_BIN["stage3/bin/zig"]
+        STD_LIB["stage3/lib/zig/std/"]
+        LANGREF["stage3/doc/langref.html"]
+    end
+
+    INSTALL --&gt; STAGE3_BIN
+    INSTALL --&gt; STD_LIB
+    INSTALL --&gt; LANGREF</literallayout>
+<simpara><emphasis>In other words, the same <literal>std.Build</literal> APIs you use for application projects also drive the self-hosted Zig compiler build.</emphasis></simpara>
+</section>
+</chapter>
+<chapter xml:id="custom-options">
+<title>Custom Build Options</title>
+<simpara>Beyond <literal>standardTargetOptions()</literal> and <literal>standardOptimizeOption()</literal>, you can define arbitrary user-facing flags with <literal>b.option()</literal> and expose them to Zig source code via <literal>b.addOptions()</literal> (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build/Step/Options.zig">Options.zig</link>).</simpara>
+<section xml:id="option-api">
+<title><literal>b.option()</literal>: CLI Flags</title>
+<simpara><literal>b.option(T, name, description)</literal> registers a user-facing flag and returns <literal>?T</literal> (null if the user didn&#8217;t provide it):</simpara>
+<programlisting language="zig" linenumbering="unnumbered">const enable_logging = b.option(bool, "enable-logging", "Enable debug logging") orelse false;
+const app_name = b.option([]const u8, "app-name", "Application name") orelse "MyApp";</programlisting>
+<simpara>Users pass values via <literal>-Dname=value</literal>:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build -Denable-logging -Dapp-name=CustomName run</programlisting>
+</section>
+<section xml:id="add-options">
+<title><literal>addOptions()</literal>: Passing Config to Code</title>
+<simpara><literal>b.addOptions()</literal> creates a step that generates a Zig source file from key-value pairs, which you then import as a module:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/06_options/build.zig[]</programlisting>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 22__build-system-deep-dive.adoc - include::example$chapters-data/code/22__build-system-deep-dive/06_options/main.zig[]</programlisting>
+<formalpara>
+<title>Build and run with custom options</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run -Denable-logging -Dapp-name=TestApp</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Application: TestApp
+Logging enabled: true
+[DEBUG] This is a debug message</programlisting>
+</para>
+</formalpara>
+<simpara>This pattern avoids the need for environment variables or runtime config files when build-time constants suffice.</simpara>
+<simpara>The Zig compiler itself uses the same approach: command-line <literal>-D</literal> options are parsed with <literal>b.option()</literal>, collected into an options step with <literal>b.addOptions()</literal>, and then imported as a <literal>build_options</literal> module that regular Zig code can read.</simpara>
+<literallayout class="monospaced">graph LR
+    subgraph "Command Line"
+        CLI["-Ddebug-allocator&lt;br/&gt;-Denable-llvm&lt;br/&gt;-Dversion-string&lt;br/&gt;etc."]
+    end
+
+    subgraph "build.zig"
+        PARSE["b.option()&lt;br/&gt;Parse options"]
+        OPTIONS["exe_options =&lt;br/&gt;b.addOptions()"]
+        ADD["exe_options.addOption()"]
+
+        PARSE --&gt; OPTIONS
+        OPTIONS --&gt; ADD
+    end
+
+    subgraph "Generated Module"
+        BUILD_OPTIONS["build_options&lt;br/&gt;(auto-generated)"]
+        CONSTANTS["pub const mem_leak_frames = 4;&lt;br/&gt;pub const have_llvm = true;&lt;br/&gt;pub const version = '0.16.0';&lt;br/&gt;etc."]
+
+        BUILD_OPTIONS --&gt; CONSTANTS
+    end
+
+    subgraph "Compiler Source"
+        IMPORT["@import('build_options')"]
+        USE["if (build_options.have_llvm) { ... }"]
+
+        IMPORT --&gt; USE
+    end
+
+    CLI --&gt; PARSE
+    ADD --&gt; BUILD_OPTIONS
+    BUILD_OPTIONS --&gt; IMPORT</literallayout>
+<simpara>Treat <literal>b.addOptions()</literal> as a structured, type-checked configuration channel from your <literal>zig build</literal> command line into ordinary Zig modules, just as the compiler does for its own <literal>build_options</literal> module.</simpara>
+</section>
+</chapter>
+<chapter xml:id="debugging-builds">
+<title>Debugging Build Failures</title>
+<simpara>When <literal>zig build</literal> fails, the error message usually points to a missing module, incorrect dependency, or misconfigured step. The <literal>-v</literal> flag enables verbose output showing all compiler invocations.</simpara>
+<section xml:id="verbose-flag">
+<title><literal>zig build -v</literal>: Inspecting Compiler Invocations</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build -v
+zig build-exe /path/to/main.zig -target x86_64-linux -O Debug -femit-bin=zig-cache/...
+zig build-lib /path/to/lib.zig -target x86_64-linux -O Debug -femit-bin=zig-cache/...
+...</programlisting>
+<simpara>This reveals the exact <literal>zig</literal> subcommands the build runner executes, helping diagnose flag issues or missing files.</simpara>
+</section>
+<section xml:id="common-errors">
+<title>Common Graph Errors</title>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">"module 'foo' not found"</emphasis>: The <literal>.imports</literal> table doesn&#8217;t include a module named <literal>foo</literal>, or a dependency wasn&#8217;t wired correctly.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">"circular dependency detected"</emphasis>: Two steps depend on each other transitively—build graphs must be acyclic.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">"file not found: src/main.zig"</emphasis>: The path passed to <literal>b.path()</literal> doesn&#8217;t exist relative to the build root.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">"no member named 'root_source_file' in ExecutableOptions"</emphasis>: You&#8217;re using Zig 0.15.2 syntax with an older compiler, or vice versa.</simpara>
+</listitem>
+</itemizedlist>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>The build runner caches artifact hashes in <literal>zig-cache/</literal>; deleting this directory forces a full rebuild.</simpara>
+</listitem>
+<listitem>
+<simpara>Passing <literal>--</literal> after <literal>zig build run</literal> forwards arguments to the executed binary: <literal>zig build run&#8201;&#8212;&#8201;--help</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>b.installArtifact()</literal> is the canonical way to expose outputs; avoid manual file copying unless you have a specific need.</simpara>
+</listitem>
+<listitem>
+<simpara>The default install step (<literal>zig build</literal> with no arguments) installs all artifacts registered with <literal>installArtifact()</literal>—if you want a no-op default, don&#8217;t install anything.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Modify the minimal example to hard-code a cross-compilation target (e.g., <literal>wasm32-wasi</literal>) and verify the output format with <literal>file zig-out/bin/hello</literal>. <link xl:href="41__cross-compilation-and-wasm.xml">43</link></simpara>
+</listitem>
+<listitem>
+<simpara>Extend the modules example to create a second module <literal>utils</literal> that <literal>math</literal> imports, demonstrating transitive dependencies.</simpara>
+</listitem>
+<listitem>
+<simpara>Add a custom option <literal>-Dmax-threads=N</literal> to the options example and use it to initialize a compile-time constant thread pool size.</simpara>
+</listitem>
+<listitem>
+<simpara>Create a library with both static and dynamic linkage modes, install both, and inspect the output files to see the size difference.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, Alternatives, Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Zig 0.14.0 introduced the <literal>root_module</literal> field; older code using <literal>root_source_file</literal> directly on <literal>ExecutableOptions</literal> will fail on Zig 0.15.2.</simpara>
+</listitem>
+<listitem>
+<simpara>Some projects still use <literal>--pkg-begin</literal>/<literal>--pkg-end</literal> flags manually instead of the module system—these are deprecated and should be migrated to <literal>Module.addImport()</literal>. <link xl:href="20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml">20</link></simpara>
+</listitem>
+<listitem>
+<simpara>The build runner does not support incremental compilation of <literal>build.zig</literal> itself—changing <literal>build.zig</literal> triggers a full graph re-evaluation.</simpara>
+</listitem>
+<listitem>
+<simpara>If you see "userland" mentioned in documentation, it means the build system is implemented entirely in Zig standard library code, not compiler magic—you can read <literal>std.Build</literal> source to understand any behavior.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

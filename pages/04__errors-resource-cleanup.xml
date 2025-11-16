@@ -1,0 +1,414 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Errors &amp; Resource Cleanup</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Chapter 3 gave us the tools to shape data; now we need rigorous ways to report when operations fail and to unwind resources predictably. Zig’s error unions let you define precise failure vocabularies, propagate them with <literal>try</literal>, and surface informative names without reaching for exceptions, as described in <link xl:href="https://ziglang.org/documentation/master/#Error-Set-Type">#Error-Set-Type</link> and <link xl:href="https://ziglang.org/documentation/master/#try">#try</link>.</simpara>
+<simpara>We also explore <literal>defer</literal> and <literal>errdefer</literal>, the paired statements that keep cleanup adjacent to acquisition so you never lose track of file handles, buffers, or other scarce resources when an error forces an early return; see <link xl:href="https://ziglang.org/documentation/master/#defer">#defer</link> and <link xl:href="https://ziglang.org/documentation/master/#errdefer">#errdefer</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Declare dedicated error sets, merge them as needed, and propagate failures with <literal>try</literal> so callers explicitly acknowledge what might go wrong.</simpara>
+</listitem>
+<listitem>
+<simpara>Translate errors into recoverable states using <literal>catch</literal>, including logging, fallback values, and structured control-flow exits, as described in <link xl:href="https://ziglang.org/documentation/master/#catch">#catch</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Pair <literal>defer</literal> and <literal>errdefer</literal> to guarantee deterministic cleanup, even when you intentionally silence an error with constructs like <literal>catch unreachable</literal>; see <link xl:href="https://ziglang.org/documentation/master/#unreachable">#unreachable</link>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="section-1">
+<title>Error Sets and Propagation</title>
+<simpara>Error-aware APIs in Zig embrace explicit unions: a function that might fail returns <literal>E!T</literal>, and each helper it calls uses <literal>try</literal> to bubble errors upward until a site decides how to recover. This keeps control flow observable while still letting successful paths look straightforward, as described in <link xl:href="https://ziglang.org/documentation/master/#Error-Handling">#Error-Handling</link>.</simpara>
+<section xml:id="section-1-sub-a">
+<title>Declaring Error Sets and Propagating with try</title>
+<simpara>By naming the exact errors a function can return, callers get compile-time exhaustiveness and readable diagnostics when values go sideways. <literal>try</literal> forwards those errors automatically, avoiding boilerplate while remaining honest about failure modes.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 04__errors-resource-cleanup.adoc - include::example$chapters-data/code/04__errors-resource-cleanup/propagation_basics.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run propagation_basics.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">input "27" -&gt; 27
+input "9x" failed with InvalidDigit
+input "120" failed with Overflow</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>The loop keeps moving because each <literal>catch</literal> branch documents its intent—report and continue—which mirrors how production code would skip a malformed record while still surfacing its name.</simpara>
+</tip>
+<section xml:id="_how_error_sets_work_internally">
+<title>How Error Sets Work Internally</title>
+<simpara>When you declare an error set in Zig, you are creating a subset of a global error registry maintained by the compiler. Understanding this architecture clarifies why error operations are fast and how error set merging works:</simpara>
+<literallayout class="monospaced">graph LR
+    subgraph "Global Error Set"
+        GES["global_error_set"]
+        NAMES["Error name strings&lt;br/&gt;Index 0 = empty"]
+
+        GES --&gt; NAMES
+
+        NAMES --&gt; ERR1["Index 1: 'OutOfMemory'"]
+        NAMES --&gt; ERR2["Index 2: 'FileNotFound'"]
+        NAMES --&gt; ERR3["Index 3: 'AccessDenied'"]
+        NAMES --&gt; ERRN["Index N: 'CustomError'"]
+    end
+
+    subgraph "Error Value"
+        ERRVAL["Value{&lt;br/&gt;  err: {name: Index}&lt;br/&gt;}"]
+
+        ERRVAL --&gt;|"name = 1"| ERR1
+    end
+
+    subgraph "Error Set Type"
+        ERRSET["Type{&lt;br/&gt;  error_set_type: {&lt;br/&gt;    names: [1,2,3]&lt;br/&gt;  }&lt;br/&gt;}"]
+
+        ERRSET --&gt; ERR1
+        ERRSET --&gt; ERR2
+        ERRSET --&gt; ERR3
+    end</literallayout>
+<simpara><emphasis role="strong">Key insights:</emphasis></simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Global Registry</emphasis>: All error names across your entire program are stored in a single global registry with unique indices.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Lightweight Values</emphasis>: Error values are just <literal>u16</literal> tags pointing into this registry—comparing errors is as fast as comparing integers.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Error Set Types</emphasis>: When you write <literal>error{InvalidDigit, Overflow}</literal>, you are creating a type that references a subset of the global registry.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Merging is Simple</emphasis>: The <literal>||</literal> operator combines error sets by creating a new type with the union of indices—no string manipulation needed.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Uniqueness Guarantee</emphasis>: Error names are globally unique, so <literal>error.InvalidDigit</literal> always refers to the same registry entry.</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This design makes error handling in Zig extremely efficient while preserving informative error names for debugging. The tag-based representation means error unions add minimal overhead compared to plain values.</simpara>
+</section>
+</section>
+<section xml:id="section-1-sub-b">
+<title>Shaping Recovery with catch</title>
+<simpara><literal>catch</literal> blocks can branch on specific errors, choose fallback values, or decide that a failure ends the current iteration. Labeling the loop clarifies which control path we resume after handling a timeout versus a disconnect.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 04__errors-resource-cleanup.adoc - include::example$chapters-data/code/04__errors-resource-cleanup/catch_and_recover.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run catch_and_recover.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">probe 0 -&gt; 42
+probe 1 timed out; using fallback 200
+probe 1 -&gt; 200
+probe 2 disconnected; skipping sample
+probe 3 -&gt; 88
+aggregate total = 330</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Timeouts degrade to a cached number, whereas disconnects abandon the sample entirely—two distinct recovery strategies made explicit in code.</simpara>
+</tip>
+</section>
+<section xml:id="section-1-sub-c">
+<title>Merging Error Sets into Stable APIs</title>
+<simpara>When reusable helpers stem from different domains—parsing, networking, storage—you can union their error sets with <literal>||</literal> to publish a single contract while still letting internal code <literal>try</literal> each step. Keeping the merged set narrow means downstream callers only reckon with the failures you actually intend to expose.</simpara>
+<section xml:id="_inferred_error_sets">
+<title>Inferred Error Sets</title>
+<simpara>Often you do not need to explicitly list every error a function might return. Zig supports <emphasis role="strong">inferred error sets</emphasis> using the <literal>!T</literal> syntax, where the compiler automatically determines which errors can be returned by analyzing your function body:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Inferred Error Set Structure"
+        IES["InferredErrorSet"]
+        FUNC["func: Index&lt;br/&gt;Owning function"]
+        ERRORS["errors: NameMap&lt;br/&gt;Direct errors"]
+        INFERREDSETS["inferred_error_sets&lt;br/&gt;Dependent IES"]
+        RESOLVED["resolved: Index&lt;br/&gt;Final error set"]
+    end
+
+    subgraph "Error Sources"
+        DIRECTRET["return error.Foo&lt;br/&gt;Direct error returns"]
+        FUNCALL["foo() catch&lt;br/&gt;Called function errors"]
+        IESCALL["bar() catch&lt;br/&gt;IES function call"]
+    end
+
+    subgraph "Resolution Process"
+        BODYANAL["Analyze function body"]
+        COLLECTERRS["Collect all errors"]
+        RESOLVEDEPS["Resolve dependent IES"]
+        CREATESET["Create error set type"]
+    end
+
+    DIRECTRET --&gt; ERRORS
+    FUNCALL --&gt; ERRORS
+    IESCALL --&gt; INFERREDSETS
+
+    BODYANAL --&gt; COLLECTERRS
+    COLLECTERRS --&gt; ERRORS
+    COLLECTERRS --&gt; INFERREDSETS
+    RESOLVEDEPS --&gt; CREATESET
+    CREATESET --&gt; RESOLVED
+
+    FUNC --&gt; BODYANAL
+    ERRORS --&gt; COLLECTERRS
+    INFERREDSETS --&gt; RESOLVEDEPS</literallayout>
+<simpara><emphasis role="strong">How it works:</emphasis></simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara><emphasis role="strong">During Analysis</emphasis>: As the compiler analyzes your function body:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Each <literal>return error.Name</literal> adds to the direct <literal>errors</literal> collection</simpara>
+</listitem>
+<listitem>
+<simpara>Each call to a function with its own inferred error set adds a dependency to <literal>inferred_error_sets</literal></simpara>
+</listitem>
+<listitem>
+<simpara>Calls to functions with explicit error sets add those errors to <literal>errors</literal></simpara>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">After Body Analysis</emphasis>: Once the function body is fully analyzed:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>All direct errors are collected from <literal>errors</literal></simpara>
+</listitem>
+<listitem>
+<simpara>Dependent inferred error sets are recursively resolved</simpara>
+</listitem>
+<listitem>
+<simpara>A final error set type is created combining all possible errors</simpara>
+</listitem>
+<listitem>
+<simpara>This type is stored in <literal>resolved</literal> and becomes the function&#8217;s error set</simpara>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Special Cases</emphasis>:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Inline and comptime calls use "adhoc" inferred error sets not tied to any specific function</simpara>
+</listitem>
+<listitem>
+<simpara>The <literal>!void</literal> return type you&#8217;ve seen in earlier chapters uses this mechanism</simpara>
+</listitem>
+</itemizedlist>
+</listitem>
+</orderedlist>
+<simpara><emphasis role="strong">Why use inferred error sets?</emphasis></simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Less maintenance</emphasis>: Errors propagate automatically when you add <literal>try</literal> calls</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Refactoring friendly</emphasis>: Adding error-returning calls doesn&#8217;t require updating signatures</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Still type-safe</emphasis>: Callers see the complete error set through type inference</simpara>
+</listitem>
+</itemizedlist>
+<simpara>When you want explicit control over your API contract, declare the error set. When internal implementation details should determine errors, use <literal>!T</literal> and let the compiler infer them.</simpara>
+</section>
+</section>
+</chapter>
+<chapter xml:id="section-2">
+<title>Deterministic Cleanup with defer</title>
+<simpara>Resource lifetime clarity comes from placing acquisition, use, and release in one lexical block. <literal>defer</literal> ensures releases happen in reverse order of registration, and <literal>errdefer</literal> supplements it for partial setup sequences that must roll back when an error interrupts progress.</simpara>
+<section xml:id="workflow-1">
+<title>defer Keeps Releases Next to Acquisition</title>
+<simpara>Using <literal>defer</literal> right after acquiring a resource documents ownership and guarantees cleanup on both success and failure, which is especially valuable for fallible jobs that may bail early.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 04__errors-resource-cleanup.adoc - include::example$chapters-data/code/04__errors-resource-cleanup/defer_cleanup.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run defer_cleanup.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">-- cycle alpha --
+acquiring alpha
+working with alpha
+job alpha succeeded
+release alpha
+-- cycle beta --
+acquiring beta
+working with beta
+job beta failed
+release beta
+beta bubbled up CalibrateFailed</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>The release call fires even on the failing job, proving that defers execute before the error reaches the caller.</simpara>
+</note>
+<section xml:id="_how_defer_execution_order_works">
+<title>How Defer Execution Order Works</title>
+<simpara>Understanding the execution order of <literal>defer</literal> and <literal>errdefer</literal> statements is crucial for writing correct cleanup code. Zig executes these statements in <emphasis role="strong">LIFO (Last In, First Out)</emphasis> order—the reverse of their registration:</simpara>
+<literallayout class="monospaced">graph TB
+    subgraph "Function Execution"
+        ENTER["Function Entry"]
+        ACQUIRE1["Step 1: Acquire Resource A&lt;br/&gt;defer cleanup_A()"]
+        ACQUIRE2["Step 2: Acquire Resource B&lt;br/&gt;defer cleanup_B()"]
+        ACQUIRE3["Step 3: Acquire Resource C&lt;br/&gt;errdefer cleanup_C()"]
+        WORK["Step 4: Do work (may error)"]
+        EXIT["Function Exit"]
+    end
+
+    subgraph "Success Path"
+        SUCCESS["Work succeeds"]
+        DEFER_C["Step 3: Run cleanup_C()"]
+        DEFER_B["Step 2: Run cleanup_B()"]
+        DEFER_A["Step 1: Run cleanup_A()"]
+        RETURN_OK["Return success"]
+    end
+
+    subgraph "Error Path"
+        ERROR["Work errors"]
+        ERRDEFER_C["Step 3: Run cleanup_C() via errdefer"]
+        ERRDEFER_B["Step 2: Run cleanup_B() via defer"]
+        ERRDEFER_A["Step 1: Run cleanup_A() via defer"]
+        RETURN_ERR["Return error"]
+    end
+
+    ENTER --&gt; ACQUIRE1
+    ACQUIRE1 --&gt; ACQUIRE2
+    ACQUIRE2 --&gt; ACQUIRE3
+    ACQUIRE3 --&gt; WORK
+
+    WORK --&gt;|"success"| SUCCESS
+    WORK --&gt;|"error"| ERROR
+
+    SUCCESS --&gt; DEFER_C
+    DEFER_C --&gt; DEFER_B
+    DEFER_B --&gt; DEFER_A
+    DEFER_A --&gt; RETURN_OK
+
+    ERROR --&gt; ERRDEFER_C
+    ERRDEFER_C --&gt; ERRDEFER_B
+    ERRDEFER_B --&gt; ERRDEFER_A
+    ERRDEFER_A --&gt; RETURN_ERR
+
+    RETURN_OK --&gt; EXIT
+    RETURN_ERR --&gt; EXIT</literallayout>
+<simpara><emphasis role="strong">Key execution rules:</emphasis></simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">LIFO Order</emphasis>: Defers execute in reverse registration order—last registered runs first.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Mirror Setup</emphasis>: This naturally mirrors initialization order, so cleanup happens in reverse of acquisition.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong"><literal>defer</literal> Always Runs</emphasis>: Regular <literal>defer</literal> statements execute on both success and error paths.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong"><literal>errdefer</literal> Conditional</emphasis>: <literal>errdefer</literal> statements only execute when the scope exits via error.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Scope-Based</emphasis>: Defers are tied to their enclosing scope (function, block, etc.).</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This LIFO guarantee ensures that resources are cleaned up in the opposite order of acquisition. This is especially important when resources depend on each other, as it prevents use-after-free scenarios during cleanup.</simpara>
+</section>
+</section>
+<section xml:id="workflow-2">
+<title>errdefer Rolls Back Partial Initialization</title>
+<simpara><literal>errdefer</literal> is ideal for staged setups: it runs only when the surrounding scope exits with an error, giving you a single place to undo whatever succeeded before the failure.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 04__errors-resource-cleanup.adoc - include::example$chapters-data/code/04__errors-resource-cleanup/errdefer_recovery.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run errdefer_recovery.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">-- success path --
+opening "primary"
+registering "primary"
+-- register failure --
+opening "backup"
+registering "backup"
+rollback "backup"
+closing "backup"
+setup failed with RegisterFailed
+-- open failure --
+opening ""
+setup failed with OpenFailed
+deregister "primary"
+closing "primary"</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>The staging function cleans up only the partially initialized <literal>backup</literal> channel, while leaving the untouched empty name alone and deferring the real teardown of the successful <literal>primary</literal> until the caller exits.</simpara>
+</note>
+</section>
+<section xml:id="section-2-sub-c">
+<title>Ignoring Errors with Intent</title>
+<simpara>Sometimes you decide an error is impossible—perhaps you validated input earlier—so you write <literal>try foo() catch unreachable;</literal> to crash immediately if the invariant is broken. Do this sparingly: in Debug and ReleaseSafe builds, <literal>unreachable</literal> traps so such assumptions are loudly revalidated at runtime.</simpara>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Favor small, descriptive error sets so API consumers read the type and instantly grasp all the failure branches they must handle.</simpara>
+</listitem>
+<listitem>
+<simpara>Remember that defers execute in reverse order; put the most fundamental cleanup last so shutdown mirrors setup.</simpara>
+</listitem>
+<listitem>
+<simpara>Treat <literal>catch unreachable</literal> as a debugging assertion—not as a way to silence legitimate failures—because safety modes turn it into a runtime trap.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>propagation_basics.zig</literal> so <literal>accumulate</literal> accepts arbitrarily long inputs by checking for overflow before multiplying, and surface a new error variant for "too many digits."</simpara>
+</listitem>
+<listitem>
+<simpara>Augment <literal>catch_and_recover.zig</literal> with a struct that records how many timeouts occurred, returning it from <literal>main</literal> so tests can assert the recovery policy.</simpara>
+</listitem>
+<listitem>
+<simpara>Modify <literal>errdefer_recovery.zig</literal> to inject an additional configuration step guarded by its own <literal>defer</literal>, then observe how both <literal>defer</literal> and <literal>errdefer</literal> cooperate when initialization stops midway.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases:</title>
+<itemizedlist>
+<listitem>
+<simpara>When interoperating with C, translate foreign error codes into Zig error sets once at the boundary so the rest of your code keeps the richer typing.</simpara>
+</listitem>
+<listitem>
+<simpara>If a cleanup routine itself can fail, prefer logging within the <literal>defer</literal> and keep the original error primary; otherwise callers may misinterpret the cleanup failure as the root cause.</simpara>
+</listitem>
+<listitem>
+<simpara>For deferred allocations, consider arenas or owned buffers: they integrate with <literal>defer</literal> by freeing everything at once, reducing the number of individual cleanup statements you need.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

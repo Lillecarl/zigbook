@@ -1,0 +1,201 @@
+////
+changes: ["Initial Compression and Archives chapter for Zig 0.15.2"]
+examples_compile: yes
+keywords: ["compression", "archives", "flate", "tar", "zip"]
+last_updated: 2025-11-06
+last_verified: 2025-11-06
+previous_chapter: "48__process-and-environment"
+next_chapter: "50__random-and-math"
+status: draft
+xref_complete: true
+open_questions: []
+////
+
+= Compression and Archives
+:chapter-number: 49
+:chapter-slug: compression-and-archives
+:creative-commons:
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Zig trims its compression APIs down to the pragmatic core: high-quality decompressors that plug into the new `std.Io.Reader`/`Writer` interfaces and feed formats like TAR and ZIP without hidden side effects. link:https://ziglang.org/download/0.15.1/release-notes.html#reworked-stdcompressflate[#reworked stdcompressflate] link:https://github.com/ziglang/zig/tree/master/lib/std/compress/flate.zig[flate.zig] Bringing these pieces together lets you revive logs, package assets, or slurp registries straight into memory while keeping the same explicit resource management discipline.
+
+Because Zig treats archives as simple byte streams, the challenge shifts from magic helper functions to composing the right iterators, buffers, and metadata checks. Mastering the decompression building blocks here prepares you for the package pipelines and deployment tooling. link:https://github.com/ziglang/zig/tree/master/lib/std/tar.zig[tar.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/zip.zig[zip.zig]
+
+[[learning-goals]]
+== Learning Goals
+
+* Drive `std.compress.flate.Decompress`, `std.compress.lzma2.decompress`, and friends directly against `std.Io.Reader`/`Writer` endpoints.link:https://github.com/ziglang/zig/tree/master/lib/std/compress/flate/Decompress.zig[Decompress.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/compress/lzma2.zig[lzma2.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/Io/Writer.zig[Writer.zig]
+* Choose history buffers, streaming limits, and allocators that keep decompression memory-safe under both debug and release builds.xref:10__allocators-and-memory-management.adoc[10]
+* Generate small TAR archives on the fly and iterate them without touching disk state.xref:28__filesystem-and-io.adoc[28]
+* Inspect and extract ZIP central directory entries while enforcing filesystem hygiene and compression-method constraints.xref:36__style-and-best-practices.adoc[36]
+
+[[streaming-decompression]]
+== Streaming Decompression Interfaces
+
+Zig's decompressors speak the same streaming dialect: you hand them any reader, optionally supply a scratch buffer, and they emit their payload into a writer you already own. That design leaves full control over allocation, error propagation, and flushing behavior.xref:22__build-system-deep-dive.adoc[22]
+
+[[streaming-decompression-flate]]
+=== Flate Containers in Practice
+
+Deflate-style payloads (raw, zlib, gzip) rely on a history window up to 32 KiB. Zig 0.15.2 lets you skip allocating that window when you pipe data straight into another writer—pass `&.{}`, and the decoder will call `streamRemaining` with minimal buffering.
+
+[source,zig]
+----
+include::{sourcedir}/49__compression-and-archives/inflate_greeting.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run inflate_greeting.zig
+----
+
+.Output
+[source,shell]
+----
+decoded (49 bytes): Streaming decompression keeps tools predictable.
+----
+
+TIP: `std.Io.Writer.fixed` provides a stack-allocated sink with deterministic capacity; always flush manual stdout buffers afterwards to avoid losing output when the process exits.xref:01__boot-basics.adoc[1]
+
+[[streaming-decompression-lzma2]]
+=== LZMA2 Without External Tooling
+
+Some registries still ship LZMA2 frames for deterministic byte-for-byte payloads. Zig wraps the decoder behind a single helper that grows an `std.Io.Writer.Allocating` for you—perfect for short configuration bundles or firmware blocks.xref:12__config-as-data.adoc[12]
+
+[source,zig]
+----
+include::{sourcedir}/49__compression-and-archives/lzma2_memory_decode.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run lzma2_memory_decode.zig
+----
+
+.Output
+[source,shell]
+----
+lzma2 decoded (13 bytes):
+Hello
+World!
+----
+
+NOTE: `std.heap.GeneralPurposeAllocator` now reports leaks via an enum—assert on `.ok` during teardown so corrupted archives fail loudly under debug builds.link:https://github.com/ziglang/zig/tree/master/lib/std/heap.zig[heap.zig] xref:13__testing-and-leak-detection.adoc[13]
+
+[[streaming-decompression-other-codecs]]
+=== Window Sizing Across zstd, xz, and Friends
+
+`std.compress.zstd.Decompress` defaults to an 8 MiB window, while `std.compress.xz.Decompress` performs checksum validation as part of stream finalization.link:https://github.com/ziglang/zig/tree/master/lib/std/compress/zstd.zig[zstd.zig] link:https://github.com/ziglang/zig/tree/master/lib/std/compress/xz.zig[xz.zig] When wiring unfamiliar data sources, start with empty scratch buffers to minimize peak memory, then profile with `ReleaseFast` builds before opting into persistent ring buffers.xref:39__performance-and-inlining.adoc[39]
+
+[[archive-workflows]]
+== Archive Workflows
+
+With decompression primitives in hand, archives become composition exercises: format-specific iterators hand you metadata, and you decide whether to buffer, discard, or stream to disk.xref:28__filesystem-and-io.adoc[28]
+
+[[archive-workflows-tar]]
+=== TAR Roundtrip Entirely in Memory
+
+`std.tar.Writer` emits deterministic 512-byte blocks, so you can assemble small bundles in RAM, inspect them, and only then decide whether to persist them.xref:24__zig-package-manager-deep.adoc[24]
+
+[source,zig]
+----
+include::{sourcedir}/49__compression-and-archives/tar_roundtrip.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run tar_roundtrip.zig
+----
+
+.Output
+[source,shell]
+----
+tar archive is 1536 bytes and holds:
+- reports (directory, 0 bytes)
+- reports/summary.txt (file, 19 bytes)
+  contents: cpu=28%
+mem=512MiB
+----
+
+TIP: After calling `Iterator.next` on a regular file, you must drain the payload with `streamRemaining`; otherwise, the next header will be misaligned and the iterator throws `error.UnexpectedEndOfStream`.
+
+[[archive-workflows-zip]]
+=== Peeking Into ZIP Central Directories Safely
+
+ZIP support exposes the central directory via `std.zip.Iterator`, leaving extraction policy to you. Routing entries through `std.testing.tmpDir` keeps artifacts isolated while you validate compression methods and inspect contents.link:https://github.com/ziglang/zig/tree/master/lib/std/testing.zig[testing.zig]
+
+[source,zig]
+----
+include::{sourcedir}/49__compression-and-archives/zip_iterator_preview.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run zip_iterator_preview.zig
+----
+
+.Output
+[source,shell]
+----
+zip archive contains:
+- demo/readme.txt (store, 34 bytes)
+  text: Decompression from Zig streaming.
+
+- demo/raw.bin (store, 4 bytes)
+  bytes:
+    00 01 02 03
+----
+
+NOTE: `std.zip.Entry.extract` only supports `store` and `deflate`; reject other methods up front or shell out to a third-party library when interoperability demands it.
+
+[[archive-workflows-patterns]]
+=== Pattern Catalog for Mixed Sources
+
+Blend these techniques to hydrate manifests from package registries, decompress release artifacts before signature checks, or stage binary blobs for GPU uploads—all without leaving Zig's standard toolbox.xref:35__project-gpu-compute-in-zig.adoc[35]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Passing a zero-length buffer to `std.compress.flate.Decompress.init` disables history reuse, but large archives benefit from reusing a `[flate.max_window_len]u8` scratch array.
+* TAR iterators keep state about unread file bytes; always stream or discard them before advancing to the next header.
+* ZIP extraction normalizes backslashes only when `allow_backslashes = true`; enforce forward slashes to avoid directory traversal bugs on Windows.xref:33__c-interop-import-export-abi.adoc[33]
+
+[[exercises]]
+== Exercises
+
+* Rework the flate example to stream directly into `std.fs.File.stdout().writer` without a fixed buffer and profile the difference across build modes.xref:39__performance-and-inlining.adoc[39]
+* Extend the TAR roundtrip demo to attach a generated checksum footer file summarizing every entry length.xref:43__stdlib-index.adoc[43]
+* Add a `verify_checksums` pass to the ZIP iterator by computing CRC32 over extracted data and comparing it to the central directory record.link:https://github.com/ziglang/zig/tree/master/lib/std/hash/crc.zig[crc.zig]
+
+[[caveats-alternatives-edge-cases]]
+== Caveats, Alternatives, Edge Cases
+
+* Compression backends (especially zstd) may require larger buffers on older CPUs without BMI2; detect `builtin.cpu.features` before choosing lean windows.xref:41__cross-compilation-and-wasm.adoc[41]
+* LZMA2 decoding still allocates internal state; stash a shared decoder if you process many small frames to avoid heap churn.xref:10__allocators-and-memory-management.adoc[10]
+* For reproducible release archives, pin file ordering and timestamps explicitly—host filesystem metadata leaks otherwise.xref:24__zig-package-manager-deep.adoc[24]

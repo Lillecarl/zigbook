@@ -1,0 +1,481 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>Library &amp; Executable Workspace</subtitle>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Chapter 22 taught the <literal>std.Build</literal> API mechanics; this chapter consolidates that knowledge through a complete project: <emphasis role="strong">TextKit</emphasis>, a text processing library paired with a CLI tool that demonstrates real-world patterns for structuring workspaces, organizing modules, linking artifacts, integrating tests, and creating custom build steps. See <link xl:href="22__build-system-deep-dive.xml">22</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build.zig">Build.zig</link>.</simpara>
+<simpara>By walking through TextKit&#8217;s implementation—from module organization to build script orchestration—you will understand how professional Zig projects separate concerns between reusable libraries and application-specific executables, while maintaining a single unified build graph that handles compilation, testing, and distribution. See <link xl:href="21__zig-init-and-package-metadata.xml">21</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build/Step/Compile.zig">Compile.zig</link>.</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Structure a workspace with both library and executable artifacts sharing a common <literal>build.zig</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Organize library code into multiple modules for maintainability and testability. <link xl:href="20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml">20</link></simpara>
+</listitem>
+<listitem>
+<simpara>Build a static library with <literal>b.addLibrary()</literal> and install it for external consumption.</simpara>
+</listitem>
+<listitem>
+<simpara>Create an executable that imports and uses the library module. <link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+</listitem>
+<listitem>
+<simpara>Integrate comprehensive tests for both library and executable components. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+<listitem>
+<simpara>Define custom build steps beyond the default install, run, and test targets.</simpara>
+</listitem>
+<listitem>
+<simpara>Understand the contrast between <literal>zig build</literal> (graph-based) and <literal>zig build-exe</literal> (imperative).</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="project-overview">
+<title>Project Structure: TextKit</title>
+<simpara>TextKit is a text processing utility consisting of:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Library (<literal>textkit</literal>)</emphasis>: Reusable text processing functions exposed as a module</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Executable (<literal>textkit-cli</literal>)</emphasis>: Command-line interface consuming the library</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Tests</emphasis>: Comprehensive coverage for library functionality</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Custom Steps</emphasis>: Demonstration commands beyond standard build/test/run</simpara>
+</listitem>
+</itemizedlist>
+<section xml:id="directory-layout">
+<title>Directory Layout</title>
+<programlisting language="text" linenumbering="unnumbered">textkit/
+├── build.zig              # Build graph definition
+├── build.zig.zon          # Package metadata
+├── sample.txt             # Demo input file
+└── src/
+    ├── textkit.zig        # Library root (public API)
+    ├── string_utils.zig   # String manipulation utilities
+    ├── text_stats.zig     # Text analysis functions
+    └── main.zig           # CLI executable entry point</programlisting>
+<simpara>This layout follows Zig conventions: <literal>src/</literal> contains all source files, <literal>build.zig</literal> orchestrates compilation, and <literal>build.zig.zon</literal> declares package identity. See <link xl:href="21__zig-init-and-package-metadata.xml">21</link> and <link xl:href="https://github.com/ziglang/zig/blob/master/lib/init/">init templates</link>.</simpara>
+</section>
+</chapter>
+<chapter xml:id="library-implementation">
+<title>Library Implementation</title>
+<simpara>The TextKit library exposes two primary modules: <literal>StringUtils</literal> for character-level operations and <literal>TextStats</literal> for document analysis. See <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build/Module.zig">Module.zig</link>.</simpara>
+<section xml:id="string-utils-module">
+<title>String Utilities Module</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/src/string_utils.zig[]</programlisting>
+<simpara>This module demonstrates:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Struct-based organization</emphasis>: Static methods grouped under <literal>StringUtils</literal></simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Inline tests</emphasis>: Each function paired with its test cases for locality</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Simple algorithms</emphasis>: Character counting, ASCII validation, in-place reversal</simpara>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="text-stats-module">
+<title>Text Statistics Module</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/src/text_stats.zig[]</programlisting>
+<simpara>Key patterns:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">State aggregation</emphasis>: <literal>TextStats</literal> struct holds computed statistics</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Analysis function</emphasis>: Pure function taking text, returning stats</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Format method</emphasis>: Zig 0.15.2 format interface for printing</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Comprehensive tests</emphasis>: Edge cases (empty text, no trailing newline)</simpara>
+</listitem>
+</itemizedlist>
+<simpara>See <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io.zig">Io.zig</link>.</simpara>
+</section>
+<section xml:id="library-root">
+<title>Library Root: Public API</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/src/textkit.zig[]</programlisting>
+<simpara>The root file (<literal>textkit.zig</literal>) serves as the library&#8217;s public interface:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Re-exports</emphasis>: Makes submodules accessible as <literal>textkit.StringUtils</literal> and <literal>textkit.TextStats</literal></simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Version metadata</emphasis>: Semantic version for external consumers</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Test aggregation</emphasis>: <literal>std.testing.refAllDecls()</literal> ensures all module tests run</simpara>
+</listitem>
+</itemizedlist>
+<simpara>This pattern allows internal reorganization without breaking consumer imports. <link xl:href="20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml">20</link>, <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/testing.zig">testing.zig</link></simpara>
+</section>
+</chapter>
+<chapter xml:id="executable-implementation">
+<title>Executable Implementation</title>
+<simpara>The CLI tool wraps library functionality in a user-friendly command-line interface with subcommands for different operations. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/process.zig">process.zig</link></simpara>
+<section xml:id="cli-structure">
+<title>CLI Structure and Argument Parsing</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/src/main.zig[lines=1..56]</programlisting>
+<simpara>The executable demonstrates:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Command dispatch</emphasis>: Routing subcommands to handler functions</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Argument validation</emphasis>: Checking parameter counts and formats</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Error handling</emphasis>: Graceful failures with informative messages</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Library consumption</emphasis>: Clean imports via <literal>@import("textkit")</literal></simpara>
+</listitem>
+</itemizedlist>
+<simpara><link xl:href="02__control-flow-essentials.xml">2</link></simpara>
+</section>
+<section xml:id="cli-handlers">
+<title>Command Handler Functions</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/src/main.zig[lines=56..126]</programlisting>
+<simpara>Each handler showcases different library features:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong"><literal>analyzeFile</literal></emphasis>: File I/O, memory allocation, text statistics</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong"><literal>reverseText</literal></emphasis>: Stack buffer usage, string manipulation</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong"><literal>countCharacter</literal></emphasis>: Simple library delegation</simpara>
+</listitem>
+</itemizedlist>
+</section>
+</chapter>
+<chapter xml:id="build-script">
+<title>Build Script: Orchestrating the Workspace</title>
+<simpara>The <literal>build.zig</literal> file ties everything together, defining how library and executable relate and how users interact with the project.</simpara>
+<section xml:id="build-script-full">
+<title>Complete Build Script</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/build.zig[]</programlisting>
+</section>
+<section xml:id="build-script-sections">
+<title>Build Script Sections Explained</title>
+<section xml:id="library-section">
+<title>Library Creation</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/build.zig[lines=15..29]</programlisting>
+<simpara>Two module creations serve different purposes:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><literal>textkit_mod</literal>: Public module for consumers (via <literal>b.addModule</literal>)</simpara>
+</listitem>
+<listitem>
+<simpara><literal>lib</literal>: Static library artifact with separate module configuration</simpara>
+</listitem>
+</itemizedlist>
+<simpara>The library module specifies only <literal>.target</literal> because optimization is user-facing, while the library artifact requires both <literal>.target</literal> and <literal>.optimize</literal> for compilation.</simpara>
+<note>
+<simpara>We use <literal>.linkage = .static</literal> to produce a <literal>.a</literal> archive file; change to <literal>.dynamic</literal> for <literal>.so</literal>/<literal>.dylib</literal>/<literal>.dll</literal> shared libraries. <link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+</note>
+</section>
+<section xml:id="executable-section">
+<title>Executable with Library Import</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/build.zig[lines=31..44]</programlisting>
+<simpara>The <literal>.imports</literal> table connects <literal>main.zig</literal> to the library module, enabling <literal>@import("textkit")</literal>. The name "textkit" is arbitrary—you could rename it to "lib" and use <literal>@import("lib")</literal> instead.</simpara>
+</section>
+<section xml:id="run-section">
+<title>Run Step with Argument Forwarding</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/build.zig[lines=46..58]</programlisting>
+<simpara>This standard pattern:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>Creates a run artifact step</simpara>
+</listitem>
+<listitem>
+<simpara>Depends on installation (ensures binary is in <literal>zig-out/bin/</literal>)</simpara>
+</listitem>
+<listitem>
+<simpara>Forwards CLI arguments after <literal>--</literal></simpara>
+</listitem>
+<listitem>
+<simpara>Wires to top-level <literal>run</literal> step</simpara>
+</listitem>
+</orderedlist>
+<simpara><link xl:href="22__build-system-deep-dive.xml">22</link>, <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build/Step/Run.zig">Run.zig</link></simpara>
+</section>
+<section xml:id="test-section">
+<title>Test Integration</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/build.zig[lines=60..79]</programlisting>
+<simpara>Separating library and executable tests isolates failures and enables parallel execution. Both depend on the same <literal>test</literal> step so <literal>zig build test</literal> runs everything. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</section>
+<section xml:id="custom-steps">
+<title>Custom Demo Step</title>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 23__project-library-and-executable-workspace.adoc - include::example$chapters-data/code/23__project-library-and-executable-workspace/build.zig[lines=80..90]</programlisting>
+<simpara>Custom steps showcase functionality without requiring user input. <literal>zig build demo</literal> runs predefined commands sequentially, demonstrating the CLI&#8217;s capabilities.</simpara>
+</section>
+</section>
+</chapter>
+<chapter xml:id="using-the-project">
+<title>Using the Project</title>
+<simpara>TextKit supports multiple workflows for building, testing, and running. <link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+<section xml:id="building">
+<title>Building Library and Executable</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build</programlisting>
+<itemizedlist>
+<title>Result</title>
+<listitem>
+<simpara>Library: <literal>zig-out/lib/libtextkit.a</literal></simpara>
+</listitem>
+<listitem>
+<simpara>Executable: <literal>zig-out/bin/textkit-cli</literal></simpara>
+</listitem>
+</itemizedlist>
+<simpara>Both artifacts are installed to standard locations by default.</simpara>
+</section>
+<section xml:id="testing">
+<title>Running Tests</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build test</programlisting>
+<formalpara>
+<title>Output (success)</title>
+<para>
+<screen>All 5 tests passed.</screen>
+</para>
+</formalpara>
+<simpara>Tests from both <literal>string_utils.zig</literal>, <literal>text_stats.zig</literal>, and <literal>main.zig</literal> run together, reporting aggregate results. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</section>
+<section xml:id="running-cli">
+<title>Running the CLI</title>
+<section xml:id="cli-usage">
+<title>View Usage</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">TextKit CLI - Text processing utility
+
+Usage:
+  textkit-cli analyze &lt;file&gt;      Analyze text file statistics
+  textkit-cli reverse &lt;text&gt;      Reverse the given text
+  textkit-cli count &lt;text&gt; &lt;char&gt; Count character occurrences</programlisting>
+</para>
+</formalpara>
+</section>
+<section xml:id="cli-reverse">
+<title>Reverse Text</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run -- reverse "Hello World"</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Original: Hello World
+Reversed: dlroW olleH</programlisting>
+</para>
+</formalpara>
+</section>
+<section xml:id="cli-count">
+<title>Count Characters</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run -- count "mississippi" "s"</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Character 's' appears 4 time(s) in: mississippi</programlisting>
+</para>
+</formalpara>
+</section>
+<section xml:id="cli-analyze">
+<title>Analyze File</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build run -- analyze sample.txt</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">File: sample.txt
+  Lines: 7
+  Words: 51
+  Characters: 336
+  ASCII only: true</programlisting>
+</para>
+</formalpara>
+</section>
+</section>
+<section xml:id="demo-step">
+<title>Running Demo Step</title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build demo</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Original: Hello Zig!
+Reversed: !giZ olleH
+Character 's' appears 4 time(s) in: mississippi</programlisting>
+</para>
+</formalpara>
+<simpara>Executes multiple commands in sequence without user interaction—useful for CI/CD pipelines or quick verification.</simpara>
+</section>
+</chapter>
+<chapter xml:id="contrasting-workflows">
+<title>Contrasting Build Workflows</title>
+<simpara>Understanding when to use <literal>zig build</literal> versus <literal>zig build-exe</literal> clarifies the build system&#8217;s purpose.</simpara>
+<section xml:id="zig-build-exe-approach">
+<title>Direct compilation with <literal>zig build-exe</literal></title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe src/main.zig --name textkit-cli --pkg-begin textkit src/textkit.zig --pkg-end</programlisting>
+<simpara>This imperative command:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Compiles immediately without graph construction</simpara>
+</listitem>
+<listitem>
+<simpara>Requires manual specification of all modules and flags</simpara>
+</listitem>
+<listitem>
+<simpara>Produces no caching or incremental compilation benefits</simpara>
+</listitem>
+<listitem>
+<simpara>Suitable for quick one-off builds or debugging</simpara>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="zig-build-approach">
+<title>Graph-based build with <literal>zig build</literal></title>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build</programlisting>
+<simpara>This declarative command:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>Executes <literal>build.zig</literal> to construct a dependency graph</simpara>
+</listitem>
+<listitem>
+<simpara>Caches artifacts and skips unchanged steps</simpara>
+</listitem>
+<listitem>
+<simpara>Parallelizes independent compilations</simpara>
+</listitem>
+<listitem>
+<simpara>Supports user customization via <literal>-D</literal> flags</simpara>
+</listitem>
+<listitem>
+<simpara>Integrates testing, installation, and custom steps</simpara>
+</listitem>
+</itemizedlist>
+<simpara>The graph-based approach scales better as projects grow, making <literal>zig build</literal> the standard for non-trivial codebases. <link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+</section>
+</chapter>
+<chapter xml:id="design-patterns">
+<title>Design Patterns and Best Practices</title>
+<simpara>TextKit demonstrates several professional patterns worth adopting.</simpara>
+<section xml:id="module-organization">
+<title>Module Organization</title>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Single responsibility</emphasis>: Each module (<literal>string_utils</literal>, <literal>text_stats</literal>) focuses on one concern</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Root re-exports</emphasis>: <literal>textkit.zig</literal> provides unified public API</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Test co-location</emphasis>: Tests live next to implementation for maintainability</simpara>
+</listitem>
+</itemizedlist>
+<simpara><link xl:href="20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml">20</link></simpara>
+</section>
+<section xml:id="build-script-patterns">
+<title>Build Script Patterns</title>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Standard options first</emphasis>: Always start with <literal>standardTargetOptions()</literal> and <literal>standardOptimizeOption()</literal></simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Logical grouping</emphasis>: Comment sections (===== LIBRARY =====) improve readability</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Artifact installation</emphasis>: Call <literal>installArtifact()</literal> for everything users should access</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Test separation</emphasis>: Independent library and executable test steps isolate failures</simpara>
+</listitem>
+</itemizedlist>
+<simpara><link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+</section>
+<section xml:id="cli-design">
+<title>CLI Design Patterns</title>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">Subcommand dispatch</emphasis>: Central router delegates to handler functions</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Graceful degradation</emphasis>: Usage messages for invalid input</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Resource cleanup</emphasis>: <literal>defer</literal> ensures allocator and file handle cleanup</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Library separation</emphasis>: All logic in library, CLI is thin wrapper</simpara>
+</listitem>
+</itemizedlist>
+</section>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Add a new subcommand <literal>trim</literal> that removes leading/trailing whitespace from text, implementing the function in <literal>string_utils.zig</literal> with tests. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/ascii.zig">ascii.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Convert the library from static (<literal>.linkage = .static</literal>) to dynamic (<literal>.linkage = .dynamic</literal>) and observe the output file differences.</simpara>
+</listitem>
+<listitem>
+<simpara>Create a second executable <literal>textkit-batch</literal> that processes multiple files in parallel using threads, sharing the same library module. <link xl:href="29__threads-and-atomics.xml">37</link></simpara>
+</listitem>
+<listitem>
+<simpara>Add a custom build step <literal>bench</literal> that runs performance benchmarks on <literal>StringUtils.reverse</literal> with various input sizes.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>The static library (<literal>.a</literal> file) is not strictly necessary since Zig can link modules directly, but producing the library artifact demonstrates traditional library distribution patterns.</simpara>
+</listitem>
+<listitem>
+<simpara>When creating both a public module (<literal>b.addModule</literal>) and a library artifact (<literal>b.addLibrary</literal>), ensure both point to the same root source file to avoid confusion.</simpara>
+</listitem>
+<listitem>
+<simpara>The <literal>installArtifact()</literal> step installs to <literal>zig-out/</literal> by default; override with <literal>.prefix</literal> option for custom installation paths.</simpara>
+</listitem>
+<listitem>
+<simpara>Tests in <literal>main.zig</literal> typically verify only that the executable compiles; comprehensive functionality tests belong in library modules. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>If the library were header-only (no runtime code), you wouldn&#8217;t need <literal>addLibrary()</literal>—only the module definition suffices. <link xl:href="20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml">20</link></simpara>
+</listitem>
+<listitem>
+<simpara>Zig 0.14.0 deprecated direct <literal>root_source_file</literal> in <literal>ExecutableOptions</literal>; always use <literal>root_module</literal> wrapper as shown here.</simpara>
+</listitem>
+<listitem>
+<simpara>For C interop scenarios, you&#8217;d add <literal>lib.linkLibC()</literal> and potentially generate headers with <literal>lib.addCSourceFile()</literal> plus <literal>installHeader()</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Large projects might split <literal>build.zig</literal> into helper functions or separate files included via <literal>@import("build_helpers.zig")</literal>—the build script is regular Zig code.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

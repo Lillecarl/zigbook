@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Debug and Valgrind</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>After building slice tooling and lightweight reflection in <link xl:href="51__mem-and-meta-utilities.xml">the previous chapter</link>, we now turn to what happens when things go wrong. Zig&#8217;s diagnostics pipeline lives in <literal>std.debug</literal>, which controls panic strategies, offers stack unwinding, and exposes helpers for printing structured data. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/debug.zig">debug.zig</link> For memory instrumentation you have <literal>std.valgrind</literal>, a thin veneer over Valgrind&#8217;s client request protocol that keeps your custom allocators visible to Memcheck without ruining portability. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/valgrind.zig">valgrind.zig</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/valgrind/memcheck.zig">memcheck.zig</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Configure panic behavior and collect stack information with <literal>std.debug</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Use stderr-aware writers and stack capture APIs without leaking unstable addresses into logs.</simpara>
+</listitem>
+<listitem>
+<simpara>Annotate custom allocations for Valgrind Memcheck and safely query leak counters at runtime.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="std-debug-overview">
+<title>Diagnostics with <literal>std.debug</literal></title>
+<simpara><literal>std.debug</literal> is the standard library&#8217;s staging ground for assertions, panic hooks, and stack unwinding. The module keeps the default panic bridge (<literal>std.debug.simple_panic</literal>) alongside a configurable <literal>FullPanic</literal> helper that funnels every safety check into your own handler. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/debug/simple_panic.zig">simple_panic.zig</link> Whether you are instrumenting tests or tightening release builds, this is the layer that decides what happens when <literal>unreachable</literal> executes.</simpara>
+<section xml:id="std-debug-panic-strategies">
+<title>Panic strategies and safety modes</title>
+<simpara>By default, a failed <literal>std.debug.assert</literal> or <literal>unreachable</literal> results in a call to <literal>@panic</literal>, which delegates to the active panic handler. You can override this globally by defining a root-level <literal>pub fn panic(message: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn</literal>, or compose a bespoke handler via <literal>std.debug.FullPanic(custom)</literal> to preserve Zig&#8217;s rich error messages while swapping termination semantics. This is especially useful in embedded or service-mode binaries where you prefer logging and clean shutdowns over aborting the process. Remember that safety features are mode-dependent—<literal>std.debug.runtime_safety</literal> evaluates to <literal>false</literal> in ReleaseFast and ReleaseSmall, so instrumentation should check that flag before assuming invariants are enforced.</simpara>
+</section>
+<section xml:id="std-debug-stack-output">
+<title>Capturing stack frames and managing stderr</title>
+<simpara>The following program demonstrates several <literal>std.debug</literal> primitives: printing to stderr, locking stderr for multi-line output, capturing a stack trace without exposing raw addresses, and reporting build parameters.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 52__debug-and-valgrind.adoc - include::example$chapters-data/code/52__debug-and-valgrind/debug_diagnostics_station.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run debug_diagnostics_station.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">[stderr] staged diagnostics
+[stderr] stack capture incoming
+frames captured -&gt; 4
+runtime_safety -&gt; enabled
+optimize_mode -&gt; Debug
+captured slice -&gt; panic probe</programlisting>
+</para>
+</formalpara>
+<simpara>A few callouts:</simpara>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.debug.print</literal> always targets stderr, so it remains separate from any structured stdout reporting.</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>std.debug.lockStderrWriter</literal> when you need atomic multi-line diagnostics; the helper temporarily clears <literal>std.Progress</literal> overlays.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.debug.captureStackTrace</literal> writes to a <literal>std.builtin.StackTrace</literal> buffer. Emitting only the frame count avoids leaking ASLR-sensitive addresses and keeps log output deterministic. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig">builtin.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Formatter access comes from the writer interface returned by <literal>std.fs.File.stdout().writer()</literal>, which mirrors the approach from earlier chapters.</simpara>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="std-debug-introspection">
+<title>Introspecting symbols and binaries</title>
+<simpara><literal>std.debug.getSelfDebugInfo()</literal> opens the current binary’s DWARF or PDB tables on demand and caches them for subsequent lookups. With that handle you can resolve instruction addresses to <literal>std.debug.Symbol</literal> records that include function names, compilation units, and optional source locations. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/debug/SelfInfo.zig">SelfInfo.zig</link> You do not need to pay that cost in hot paths: store addresses (or stack snapshots) first, then resolve them lazily in telemetry tools or when generating a bug report. On platforms where debug info is stripped or unavailable, the API returns <literal>error.MissingDebugInfo</literal>, so wrap the lookup in a fallback that prints module names only.</simpara>
+</section>
+</chapter>
+<chapter xml:id="std-valgrind-overview">
+<title>Instrumenting with <literal>std.valgrind</literal></title>
+<simpara><literal>std.valgrind</literal> mirrors Valgrind’s client requests while compiling down to no-ops when <literal>builtin.valgrind_support</literal> is false, keeping your binaries portable. You can detect Valgrind at runtime via <literal>std.valgrind.runningOnValgrind()</literal> (useful for suppressing self-tests that spawn massive workloads) and query accumulated error counts with <literal>std.valgrind.countErrors()</literal>.</simpara>
+<section xml:id="std-valgrind-memcheck">
+<title>Marking custom allocations for Memcheck</title>
+<simpara>When you roll your own allocator, Memcheck cannot infer which buffers are live unless you annotate them. The following example shows the canonical pattern: announce a block, adjust its definedness, run a quick leak check, and free the block when done.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 52__debug-and-valgrind.adoc - include::example$chapters-data/code/52__debug-and-valgrind/valgrind_integration_probe.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run valgrind_integration_probe.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">running_on_valgrind -&gt; no
+leaks_bytes -&gt; 0
+errors_seen -&gt; 0</programlisting>
+</para>
+</formalpara>
+<simpara>Even outside Valgrind the calls succeed—every request degrades to a stub when client support is absent—so you can leave the instrumentation in release binaries without gating on build flags. The sequence worth memorizing is:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara><literal>std.valgrind.mallocLikeBlock</literal> immediately after you obtain memory from a custom allocator.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.valgrind.memcheck.createBlock</literal> with a zero-terminated label so Memcheck reports use the name you expect.</simpara>
+</listitem>
+<listitem>
+<simpara>Optional range adjustments such as <literal>makeMemNoAccess</literal> and <literal>makeMemDefinedIfAddressable</literal> when you deliberately poison or unpoison guard bytes.</simpara>
+</listitem>
+<listitem>
+<simpara>A matching <literal>std.valgrind.freeLikeBlock</literal> (and <literal>memcheck.discard</literal>) before the underlying allocator releases the memory.</simpara>
+</listitem>
+</orderedlist>
+</section>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Stack capture relies on debug info; in stripped builds or unsupported targets, <literal>std.debug.captureStackTrace</literal> falls back to empty results, so wrap diagnostics with graceful degradation.</simpara>
+</listitem>
+<listitem>
+<simpara><literal>std.debug.FullPanic</literal> executes on every safety violation. Ensure the handler performs only async-signal-safe operations if you plan to log from multiple executor threads.</simpara>
+</listitem>
+<listitem>
+<simpara>Valgrind annotations are cheap in native runs but do not cover sanitizer-based tooling—prefer compiler sanitizers (ASan/TSan) when you need deterministic CI coverage. <link xl:href="37__illegal-behavior-and-safety-modes.xml">37</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Implement a custom panic handler that logs to a ring buffer using <literal>std.debug.FullPanic</literal>, then forwards to the default handler in debug mode.</simpara>
+</listitem>
+<listitem>
+<simpara>Extend <literal>debug_diagnostics_station.zig</literal> so that stack captures are resolved to symbol names via <literal>std.debug.getSelfDebugInfo()</literal>, caching results to avoid repeated lookups.</simpara>
+</listitem>
+<listitem>
+<simpara>Modify <literal>valgrind_integration_probe.zig</literal> to wrap a bump allocator: record every active span in a table, and call <literal>std.valgrind.memcheck.doQuickLeakCheck()</literal> only when the process shuts down. <link xl:href="10__allocators-and-memory-management.xml">10</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.debug.dumpCurrentStackTrace</literal> prints absolute addresses and source paths that vary per run because of ASLR; capture to an in-memory buffer and redact volatile fields before shipping telemetry.</simpara>
+</listitem>
+<listitem>
+<simpara>Valgrind&#8217;s client requests depend on the <literal>xchg</literal>-based handshake and are no-ops on architectures that Valgrind does not support—<literal>runningOnValgrind()</literal> will always return zero there.</simpara>
+</listitem>
+<listitem>
+<simpara>Memcheck annotations do not replace structured testing; combine them with Zig&#8217;s leak detection (<literal>zig test --detect-leaks</literal>) for deterministic regression coverage. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

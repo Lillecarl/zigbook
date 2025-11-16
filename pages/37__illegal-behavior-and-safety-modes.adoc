@@ -1,0 +1,182 @@
+////
+changes: ["Initial illegal behavior and safety modes chapter"]
+examples_compile: yes
+keywords: ["illegal-behavior", "runtime-safety", "optimize-mode"]
+last_updated: 2025-11-06
+last_verified: 2025-11-06
+next_chapter: "38__zig-cli-deep-dive"
+open_questions: []
+previous_chapter: "36__style-and-best-practices"
+status: draft
+xref_complete: true
+////
+
+= Illegal Behavior & Safety Modes
+:chapter-number: 37
+:chapter-slug: illegal-behavior-and-safety-modes
+:creative-commons:
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Finishing our style tune-up made it clear that invariants are worthless unless they fail loudly (xref:36__style-and-best-practices.adoc[36]). This chapter explains how Zig formalizes those failures as illegal behavior and how the toolchain catches most of them before they corrupt state. link:https://ziglang.org/documentation/master/#illegal-behavior[#illegal behavior]
+
+Next we will dive into command-line tooling, so we want our runtime guardrails in place before scripting toggles optimization modes on our behalf. xref:38__zig-cli-deep-dive.adoc[38]
+
+[[learning-goals]]
+== Learning Goals
+
+* Distinguish between safety-checked and unchecked categories of illegal behavior.
+* Inspect the active optimization mode and reason about which runtime checks Zig will emit.
+* Build contracts around `@setRuntimeSafety`, `unreachable`, and `std.debug.assert` to keep invariants provable in every build.
+
+_Refs: xref:04__errors-resource-cleanup.adoc[4]_
+
+[[illegal-behavior-basics]]
+== Illegal Behavior in Zig
+
+Illegal behavior is Zig's umbrella term for operations the language refuses to define, ranging from integer overflow to dereferencing an invalid pointer. We have already relied on bounds checks for slices and optionals; this section consolidates those rules so the upcoming CLI work inherits a predictable failure story. xref:03__data-fundamentals.adoc[3]
+
+[[illegal-behavior-checked-unchecked]]
+=== Safety-Checked vs Unchecked Paths
+
+Safety-checked illegal behavior covers the cases the compiler can instrument at runtime (overflow, sentinel mismatches, wrong-union-field access), while unchecked cases remain invisible to safety instrumentation (aliasing through the wrong pointer type, layout violations from foreign code).
+
+Debug and ReleaseSafe keep the guards on by default. ReleaseFast and ReleaseSmall assume you traded those traps for performance, so anything that slips past your invariants becomes undefined in practice.
+
+[[illegal-behavior-guarded-example]]
+=== Example: Guarding Unchecked Arithmetic
+
+The following helper proves an addition safe with `@addWithOverflow`, then disables runtime safety for the final `+` to avoid redundant checks while saturating pathological inputs to the type's maximum. link:https://ziglang.org/documentation/master/#setruntimesafety[#setruntimesafety]
+
+[source,zig]
+----
+include::{sourcedir}/37__illegal-behavior-and-safety-modes/01_guarded_runtime_safety.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 01_guarded_runtime_safety.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+NOTE: Running the same test with `-OReleaseFast` verifies that the guard continues to saturate rather than panic even when global runtime safety is absent.
+
+[[safety-modes]]
+== Safety Defaults by Optimization Mode
+
+The current optimization mode is exposed as `@import("builtin").mode`, making it easy to surface which runtime checks will exist in a given artifact without consulting build scripts. link:https://ziglang.org/documentation/master/#compile-variables[#compile variables] The table below summarizes the default contract each mode offers before you start opting in or out of checks manually.
+
+[%autowidth,cols="1,1,2",options="header"]
+|===
+| Mode | Runtime safety | Typical intent
+| Debug | Enabled | Development builds with maximum diagnostics and stack traces.
+| ReleaseSafe | Enabled | Production builds that still prefer predictable traps over silent corruption.
+| ReleaseFast | Disabled | High-performance binaries that assume invariants are already proven elsewhere.
+| ReleaseSmall | Disabled | Size-constrained deliverables where every injected trap would be a liability.
+|===
+
+[[safety-modes-probe]]
+=== Instrumenting Safety at Runtime
+
+This probe prints the active mode and the implied safety default, then compares a checked addition with an unchecked one so you can see what survives when checks vanish.
+
+[source,zig]
+----
+include::{sourcedir}/37__illegal-behavior-and-safety-modes/02_mode_probe.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run 02_mode_probe.zig
+----
+
+.Output
+[source,shell]
+----
+optimize-mode: Debug
+runtime-safety-default: true
+checked-add result=24 overflowed=true
+unchecked-add result=24
+----
+
+TIP: Re-run the probe with `-OReleaseFast` to watch the default safety flag flip to `false` while the checked path still reports the overflow, helping you document feature flags or telemetry you might need in release builds.
+
+[[contracts-and-panics]]
+== Contracts, Panics, and Recovery
+
+Stack traces are calmly terrifying when you trigger `unreachable` in a safety-enabled build. Treat them as the last line of defense after assertions and error unions have exhausted graceful exits. link:https://ziglang.org/documentation/master/#reaching-unreachable-code[#reaching unreachable code]
+
+Pairing that discipline with the error-handling techniques from earlier chapters keeps failure modes debuggable without sacrificing determinism. xref:04__errors-resource-cleanup.adoc[4]
+
+[[contracts-example]]
+=== Example: Asserting Digit Conversion
+
+Here we document an ASCII digit contract twice: once with an assertion that unlocks unchecked math and once with an error union for caller-friendly validation. link:https://github.com/ziglang/zig/tree/master/lib/std/debug.zig[debug.zig]
+
+[source,zig]
+----
+include::{sourcedir}/37__illegal-behavior-and-safety-modes/03_unreachable_contract.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 03_unreachable_contract.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+IMPORTANT: The assertion-backed path compiles to a single subtraction in ReleaseFast, but it still panics in Debug if you pass a non-digit. Keep a defensive error-returning variant around for untrusted data.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Even in Debug mode, some pointer-based mistakes stay unchecked. Prefer slice-based APIs when you need bounds enforcement.
+* Narrow the scope of `@setRuntimeSafety(false)` to the smallest possible block and prove the preconditions before toggling it.
+* Capture panic stack traces in development and ship symbol files if you expect to triage ReleaseSafe crashes later.
+
+[[exercises]]
+== Exercises
+
+* Extend `guardedUncheckedAdd` to emit diagnostics when a sentinel-terminated slice would overflow the destination buffer, then measure the difference between safety-on and safety-off builds. link:https://ziglang.org/documentation/master/#sentinel-terminated-arrays[#sentinel terminated arrays]
+* Write a benchmarking harness that loops through millions of safe additions, toggling `@setRuntimeSafety` per iteration to confirm the cost of the guard in each mode.
+* Enhance the mode probe to log build metadata in your upcoming CLI project so scripts can warn when ReleaseFast binaries omit traps. xref:38__zig-cli-deep-dive.adoc[38]
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Failing to switch from `+` to `@addWithOverflow` in ReleaseFast risks silent wraparound that only manifests under rare load patterns.
+* Runtime safety does not defend against concurrent data races. Pair these tools with the synchronization primitives introduced later in the book.
+* When calling into C code, remember that Zig's checks stop at the FFI boundary. Validate foreign inputs before trusting invariants. xref:33__c-interop-import-export-abi.adoc[33]

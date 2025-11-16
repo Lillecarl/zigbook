@@ -1,0 +1,157 @@
+////
+changes: ["Initial appendix summarizing Zig style highlights"]
+examples_compile: yes
+keywords: ["style", "appendix", "guidelines"]
+last_updated: 2025-11-13
+last_verified: 2025-11-13
+next_chapter: "56__builtins-quick-reference"
+open_questions: []
+previous_chapter: "54__project-zip-unzip-with-progress"
+status: draft
+xref_complete: true
+////
+
+= Appendix A. Style Guide Highlights
+:chapter-number: 55
+:chapter-slug: style-guide-highlights
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Teams stay nimble when their naming, comments, and module layout follow a predictable rhythm. This appendix distills the house style into a quick reference that you can keep open while reviewing pull requests or scaffolding new modules.
+
+Zig 0.15.2 tightened formatter output, stabilized doc comment handling, and clarified testing ergonomics; adopting those defaults means less time negotiating conventions and more time verifying behavior.link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
+
+[[learning-goals]]
+== Learning Goals
+
+* Audit a module quickly by scanning for the canonical ordering of doc comments, types, functions, and tests.
+* Describe what “tight error vocabulary” means in Zig and when to prefer bespoke error sets over `anyerror`.
+* Wire deterministic tests alongside the code they document without sacrificing readability in larger files.
+
+_Refs: _
+
+[[voice-naming]]
+== Voice & Naming at a Glance
+
+Readable code starts with alignment between prose and identifiers: the doc comment should speak the same nouns that the exported symbol implements, while helper functions keep verbs short and active.link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig] Following this pattern lets reviewers focus on semantics instead of debating word choice.
+
+[[naming-comments]]
+=== Naming, Comments, and Writers
+
+This example pairs module-level narration with focused doc comments and uses a fixed buffer writer so the tests never touch the allocator.link:https://github.com/ziglang/zig/tree/master/lib/std/Io.zig[Io.zig]
+
+[source,zig]
+----
+include::{sourcedir}/55__style-guide-highlights/01_naming_and_comments.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 01_naming_and_comments.zig
+----
+
+.Output
+[source,shell]
+----
+All 1 tests passed.
+----
+
+TIP: Formatting the descriptive sentence before the code encourages readers to skim the type signature and the test together; keeping terminology aligned with the doc comment mirrors the advice in Chapter 36.xref:36__style-and-best-practices.adoc[36]
+
+[[error-vocabulary]]
+=== Tight Error Vocabularies
+
+Precise error sets balance empathy for callers with lightweight control flow; instead of returning `anyerror`, we list exactly the states the parser can reach and promote them to public API surface.link:https://github.com/ziglang/zig/tree/master/lib/std/math.zig[math.zig]
+
+[source,zig]
+----
+include::{sourcedir}/55__style-guide-highlights/02_error_vocabulary.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 02_error_vocabulary.zig
+----
+
+.Output
+[source,shell]
+----
+All 1 tests passed.
+----
+
+NOTE: The test suite demonstrates that each branch stays reachable, preventing dead strings and teaching consumers which names to `switch` on without reading the implementation.xref:36__style-and-best-practices.adoc[36]
+
+[[module-layout]]
+=== Module Layout Checklist
+
+When a file exports configuration helpers, keep the public façade first, collect private validators underneath, and end with table-driven tests that read as documentation.xref:12__config-as-data.adoc[12]
+
+[source,zig]
+----
+include::{sourcedir}/55__style-guide-highlights/03_module_layout.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 03_module_layout.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+TIP: Locating the error set at the top keeps the type graph obvious and mirrors how `std.testing` materializes invariants right next to the code that depends on them.link:https://github.com/ziglang/zig/tree/master/lib/std/testing.zig[testing.zig]
+
+[[patterns]]
+== Patterns to Keep on Hand
+
+* Reserve `//!` for module-level narration and `///` for API documentation so generated references keep a consistent voice across packages.xref:36__style-and-best-practices.adoc[36]
+* Pair every exposed helper with a focused test block; Zig's test runner makes colocated tests free, and they double as executable usage examples.
+* When the formatter reflows signatures, accept its judgment—consistency between editors and CI was one of the major quality-of-life improvements in 0.15.x.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Do not suppress warnings from `zig fmt`; instead, adjust the code so the defaults succeed and document any unavoidable divergence in your contributing guide.xref:36__style-and-best-practices.adoc[36]
+* Keep project-local lint scripts in sync with upstream Zig releases so chore churn stays low during toolchain upgrades.
+* If your API emits container types from `std`, reference their exact field names in doc comments—callers can jump to `zig/lib/std` directly to confirm semantics.link:https://github.com/ziglang/zig/tree/master/lib/std/hash_map.zig[hash_map.zig]
+
+[[exercises]]
+== Exercises
+
+* Rewrite one of your recent modules by grouping constants, types, functions, and tests in the order shown above, then run `zig fmt` to confirm the structure stays stable.xref:36__style-and-best-practices.adoc[36]
+* Extend `parseCount` to accept underscores for readability while maintaining a strict error vocabulary; add targeted tests for the new branch.
+* Generate HTML documentation for a project using `zig build doc` and review how `//!` and `///` comments surface—tune the prose until the output reads smoothly.
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Some teams prefer fully separated test files; if you do, adopt the same naming and doc comment patterns so search results stay predictable.xref:36__style-and-best-practices.adoc[36]
+* For modules that expose comptime-heavy APIs, include a `test "comptime"` block so these guidelines still deliver runnable coverage.xref:15__comptime-and-reflection.adoc[15]
+* When vendoring third-party code, annotate deviations from this style in a short README so reviewers know the divergence is intentional.link:https://github.com/ziglang/zig/tree/master/lib/std/Build.zig[Build.zig]

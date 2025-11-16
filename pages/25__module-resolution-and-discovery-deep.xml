@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Module Resolution &amp; Discovery (Deep Concept)</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>This chapter zooms in on what happens <emphasis role="strong">after</emphasis> packages register modules—how names become concrete imports, when the compiler opens files, and what hooks control discovery (see <link xl:href="https://github.com/ziglang/zig/blob/master/lib/compiler/build_runner.zig">build_runner.zig</link>). We will model the module graph, illuminate the difference between filesystem paths and registered namespaces, and show how to guard optional helpers without scattering fragile <literal>#ifdef</literal>-style logic.</simpara>
+<simpara>Along the way we will explore compile-time imports, test-specific discovery, and safe probing with <literal>@hasDecl</literal>, reinforcing the writer API changes introduced in Zig 0.15.2 so every example doubles as a reference for correct stdout usage (see <link xl:href="https://ziglang.org/download/0.15.1/release-notes.html#">v0.15.2</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig">File.zig</link>).</simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Trace how the build runner expands registered module names into a dependency-aware module graph. <link xl:href="24__zig-package-manager-deep.xml">24</link></simpara>
+</listitem>
+<listitem>
+<simpara>Distinguish filesystem-relative imports from build-registered modules and predict which wins in ambiguous cases (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build.zig">Build.zig</link> and <link xl:href="22__build-system-deep-dive.xml">22</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Recognize every mechanism that triggers module discovery: direct imports, <literal>comptime</literal> blocks, <literal>test</literal> declarations, exports, and entry-point probing (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/start.zig">start.zig</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/testing.zig">testing.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Apply compile-time guards to make optional tooling disappear from release artifacts while keeping debug builds richly instrumented (see <link xl:href="19__modules-and-imports-root-builtin-discovery.xml">19</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/builtin.zig">builtin.zig</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>@hasDecl</literal> and related reflection helpers to detect capabilities without relying on lossy string comparisons or unchecked assumptions (see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/meta.zig">meta.zig</link> and <link xl:href="15__comptime-and-reflection.xml">15</link>).</simpara>
+</listitem>
+<listitem>
+<simpara>Document and test discovery policies so collaborators understand when the build graph will include extra modules. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="module-graph-mapping">
+<title>Module Graph Mapping</title>
+<simpara>The compiler turns every translation unit into a struct-like namespace. Imports correspond to edges in that graph, and the build runner feeds it a list of pre-registered namespaces so modules resolve deterministically even when no file with that name exists on disk.</simpara>
+<simpara>Under the hood, these namespaces live inside the <literal>Zcu</literal> compilation state alongside the intern pool, files, and analysis work queues:</simpara>
+<literallayout class="monospaced">graph TB
+	ZCU["Zcu"]
+
+	subgraph "Compilation State"
+		INTERNPOOL["intern_pool: InternPool"]
+		FILES["files: MultiArrayList(File)"]
+		NAMESPACES["namespaces: MultiArrayList(Namespace)"]
+	end
+
+	subgraph "Source Tracking"
+		ASTGEN["astgen_work_queue"]
+		SEMA["sema_work_queue"]
+		CODEGEN["codegen_work_queue"]
+	end
+
+	subgraph "Threading"
+		WORKERS["comp.thread_pool"]
+		PERTHREAD["per_thread: []PerThread"]
+	end
+
+	subgraph "Symbol Management"
+		NAVS["Navigation Values (Navs)"]
+		UAVS["Unbound Anon Values (Uavs)"]
+		EXPORTS["single_exports / multi_exports"]
+	end
+
+	ZCU --&gt; INTERNPOOL
+	ZCU --&gt; FILES
+	ZCU --&gt; NAMESPACES
+	ZCU --&gt; ASTGEN
+	ZCU --&gt; SEMA
+	ZCU --&gt; CODEGEN
+	ZCU --&gt; WORKERS
+	ZCU --&gt; PERTHREAD
+	ZCU --&gt; NAVS
+	ZCU --&gt; UAVS
+	ZCU --&gt; EXPORTS</literallayout>
+<simpara>Module resolution walks this namespace graph as it evaluates <literal>@import</literal> edges, using the same <literal>Zcu</literal> and <literal>InternPool</literal> machinery that powers incremental compilation and symbol resolution.</simpara>
+<section xml:id="root-std-builtin">
+<title>Root, <literal>std</literal>, and <literal>builtin</literal> namespaces</title>
+<simpara>The root module is whichever file the compiler treats as the entry point. From that root you can inspect yourself via <literal>@import("root")</literal>, reach the bundled standard library through <literal>@import("std")</literal>, and access compiler-provided metadata via <literal>@import("builtin")</literal>. The following probe prints what each namespace exposes and demonstrates that filesystem-based imports (<literal>extras.zig</literal>) participate in the same graph. <link xl:href="19__modules-and-imports-root-builtin-discovery.xml">19</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 25__module-resolution-and-discovery-deep.adoc - include::example$chapters-data/code/25__module-resolution-and-discovery-deep/01_root_namespace.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 01_root_namespace.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">root has main(): true
+root has helperSymbol(): true
+std namespace type: type
+current build mode: Debug
+extras.greet(): extras namespace discovered via file path</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>The call to <literal>std.fs.File.stdout().writer(&amp;buffer)</literal> mirrors the 0.15.2 writer API: we buffer, print, and flush to avoid truncated output while remaining allocator-free.</simpara>
+</note>
+</section>
+<section xml:id="name-registration">
+<title>Names registered by the build graph</title>
+<simpara>When you call <literal>b.createModule</literal> or <literal>exe.addModule</literal>, you register a <emphasis role="strong">namespace name</emphasis> (e.g. <literal>"logging"</literal>) and a root source file. Any <literal>@import("logging")</literal> in that build graph points at the registered module even if a <literal>logging.zig</literal> file sits next to the caller. Only when no registered namespace is found does the compiler fall back to path-based resolution relative to the importing file. This is how dependencies fetched via <literal>build.zig.zon</literal> expose their modules: the build script constructs the graph long before user code executes. <link xl:href="24__zig-package-manager-deep.xml">24</link></simpara>
+<simpara>The compiler enforces that a given file belongs to exactly one module. The compile-error test suite includes a case where the same file is imported both as a registered module and as a direct file path, which is rejected:</simpara>
+<programlisting language="zig" linenumbering="unnumbered">const case = ctx.obj("file in multiple modules", b.graph.host);
+case.addDepModule("foo", "foo.zig");
+
+case.addError(
+	\\comptime {
+	\\    _ = @import("foo");
+	\\    _ = @import("foo.zig");
+	\\}
+, &amp;[_][]const u8{
+	":1:1: error: file exists in modules 'foo' and 'root'",
+	":1:1: note: files must belong to only one module",
+	":1:1: note: file is the root of module 'foo'",
+	":3:17: note: file is imported here by the root of module 'root'",
+});</programlisting>
+<simpara>This demonstrates that a file can be either the root of a registered module or part of the root module via path-based import, but not both at once.</simpara>
+</section>
+</chapter>
+<chapter xml:id="discovery-triggers">
+<title>Discovery Triggers and Timing</title>
+<simpara>Module discovery starts the moment an import string is known at compile time. The compiler parses the dependency graph in waves, queuing new modules as soon as an import is evaluated in a <literal>comptime</literal> context. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+<section xml:id="comptime-imports">
+<title>Imports, <literal>comptime</literal>, and evaluation order</title>
+<simpara>A <literal>comptime</literal> block runs during semantic analysis. If it contains <literal>_ = @import("tooling.zig");</literal>, the build runner resolves and parses that module immediately—even if the runtime never references it. Use explicit policies (flags, optimization modes, or build options) so such imports are predictable rather than surprising.</simpara>
+<tip>
+<simpara>Resist the temptation to inline string concatenation inside <literal>@import</literal>; Zig requires the import target to be a compile-time known string anyway, so prefer a single constant that documents intent.</simpara>
+</tip>
+</section>
+<section xml:id="tests-and-entries">
+<title>Tests, exports, and entry probing</title>
+<simpara><literal>test</literal> blocks and <literal>pub export</literal> declarations also trigger discovery. When you run <literal>zig test</literal>, the compiler imports every test-bearing module, injects a synthetic main, and invokes <literal>std.testing</literal> harness helpers. Similarly, <literal>std.start</literal> inspects the root module for <literal>main</literal>, <literal>_start</literal>, and platform-specific entry points, pulling in whichever modules those declarations reference along the way. This is why even dormant test helpers must live behind <literal>comptime</literal> guards; otherwise they leak into production artifacts just because a <literal>test</literal> declaration exists. <link xl:href="19__modules-and-imports-root-builtin-discovery.xml">19</link></simpara>
+<simpara><emphasis>In the Zig compiler&#8217;s own build, the path from test declarations through <literal>std.testing</literal> to the test runner and <literal>zig test</literal> command looks like this:</emphasis></simpara>
+<literallayout class="monospaced">graph TB
+	subgraph "Test Declaration Layer"
+		TESTDECL["test declarations&lt;br/&gt;test keyword"]
+		DOCTEST["doctests&lt;br/&gt;named tests"]
+		ANON["anonymous tests&lt;br/&gt;unnamed tests"]
+
+		TESTDECL --&gt; DOCTEST
+		TESTDECL --&gt; ANON
+	end
+
+	subgraph "std.testing Namespace"
+		EXPECT["expect()&lt;br/&gt;expectEqual()&lt;br/&gt;expectError()"]
+		ALLOCATOR["testing.allocator&lt;br/&gt;leak detection"]
+		FAILING["failing_allocator&lt;br/&gt;OOM simulation"]
+		UTILS["expectEqualSlices()&lt;br/&gt;expectEqualStrings()"]
+
+		EXPECT --&gt; ALLOCATOR
+		ALLOCATOR --&gt; FAILING
+	end
+
+	subgraph "Test Runner"
+		RUNNER["test_runner.zig&lt;br/&gt;default runner"]
+		STDERR["stderr output"]
+		SUMMARY["test summary&lt;br/&gt;pass/fail/skip counts"]
+
+		RUNNER --&gt; STDERR
+		RUNNER --&gt; SUMMARY
+	end
+
+	subgraph "Execution"
+		ZIGTEST["zig test command"]
+		BUILD["test build"]
+		EXEC["execute tests"]
+		REPORT["report results"]
+
+		ZIGTEST --&gt; BUILD
+		BUILD --&gt; EXEC
+		EXEC --&gt; REPORT
+	end
+
+	TESTDECL --&gt; EXPECT
+	EXPECT --&gt; RUNNER
+	RUNNER --&gt; ZIGTEST
+
+	style EXPECT fill:#f9f9f9
+	style RUNNER fill:#f9f9f9
+	style TESTDECL fill:#f9f9f9</literallayout>
+<simpara><emphasis>This makes it clear that adding <literal>test</literal> declarations not only pulls in <literal>std.testing</literal> but also wires your modules into the test build and execution pipeline driven by <literal>zig test</literal>.</emphasis></simpara>
+</section>
+</chapter>
+<chapter xml:id="conditional-discovery">
+<title>Conditional Discovery Patterns</title>
+<simpara>Optional tooling should not require separate branches of your repository. Instead, drive discovery from compile-time data and reflect over namespaces to decide what to activate. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+<section xml:id="opt-mode-gating">
+<title>Gating modules with optimization mode</title>
+<simpara>Optimization mode is baked into <literal>builtin.mode</literal>. Use it to import expensive diagnostics only when building for Debug. The example below wires in <literal>debug_tools.zig</literal> during Debug builds and skips it for ReleaseFast, while also demonstrating the buffered-writer pattern required in Zig 0.15.2.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 25__module-resolution-and-discovery-deep.adoc - include::example$chapters-data/code/25__module-resolution-and-discovery-deep/02_conditional_import.zig[]</programlisting>
+<formalpara>
+<title>Run (Debug)</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 02_conditional_import.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">build mode: Debug
+debug tooling wired at comptime</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Run (ReleaseFast)</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run -OReleaseFast 02_conditional_import.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">build mode: ReleaseFast
+no debug tooling imported</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Because <literal>@import("debug_tools.zig")</literal> sits behind a <literal>comptime</literal> condition, ReleaseFast binaries never even parse the helper, protecting the build from accidentally depending on debug-only globals.</simpara>
+</note>
+</section>
+<section xml:id="safe-probing">
+<title>Safe probing with <literal>@hasDecl</literal></title>
+<simpara>Rather than assuming a module exports a particular function, probe it. Here we expose a <literal>plugins</literal> namespace that either forwards to <literal>plugins_enabled.zig</literal> or returns an empty struct. <literal>@hasDecl</literal> tells us at compile time whether the optional <literal>install</literal> hook exists, enabling a safe runtime branch that works in every build mode. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 25__module-resolution-and-discovery-deep.adoc - include::example$chapters-data/code/25__module-resolution-and-discovery-deep/03_safe_probe.zig[]</programlisting>
+<formalpara>
+<title>Run (Debug)</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run 03_safe_probe.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">plugin discovered: Diagnostics overlay instrumentation active</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Run (ReleaseFast)</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig run -OReleaseFast 03_safe_probe.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">no plugin available; continuing safely</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Notice that we test for a declaration on the namespace type itself (<literal>plugins.namespace</literal>). This keeps the root module agnostic to the plugin’s internal structure and avoids stringly typed feature toggles. <link xl:href="19__modules-and-imports-root-builtin-discovery.xml">19</link></simpara>
+</note>
+</section>
+<section xml:id="namespace-hygiene">
+<title>Namespace hygiene checklist</title>
+<itemizedlist>
+<listitem>
+<simpara>Document which modules the build registers and why; treat the list as part of your public API so consumers know what <literal>@import</literal> calls are stable. <link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+</listitem>
+<listitem>
+<simpara>Prefer re-exporting small, typed structs over dumping entire helper modules into the root namespace; this keeps <literal>@hasDecl</literal> probes fast and predictable.</simpara>
+</listitem>
+<listitem>
+<simpara>When mixing filesystem and registered imports, choose distinct names so callers never wonder which module they are getting. <link xl:href="24__zig-package-manager-deep.xml">24</link></simpara>
+</listitem>
+</itemizedlist>
+<sidebar>
+<title>Namespace dependency internals</title>
+<simpara>Internally, the compiler tracks dependencies on entire namespaces and individual names as separate dependees. This is why adding or renaming declarations in a namespace can invalidate downstream modules even if their source files do not change:</simpara>
+<literallayout class="monospaced">graph LR
+	subgraph "Namespace Dependencies"
+		NSFULL["Full Namespace&lt;br/&gt;TrackedInst.Index&lt;br/&gt;namespace_deps"]
+		NSNAME["Namespace Name&lt;br/&gt;NamespaceNameKey&lt;br/&gt;namespace_name_deps"]
+	end
+
+	subgraph "Memoized State"
+		MEMO["Memoized Fields&lt;br/&gt;panic_messages, etc."]
+	end</literallayout>
+<simpara>Each dependee category has its own invalidation rule—for example, <literal>namespace_deps</literal> invalidates on any name change in a namespace, while <literal>namespace_name_deps</literal> tracks the existence of a specific symbol.</simpara>
+</sidebar>
+</section>
+</chapter>
+<chapter xml:id="operational-guidance">
+<title>Operational Guidance</title>
+<itemizedlist>
+<listitem>
+<simpara>Include discovery tests in your CI pipeline: compile Debug and Release builds, ensuring optional tooling toggles on and off exactly once. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>zig build --fetch</literal> (from Chapter 24) before running experiments so the dependency graph is fully cached and deterministic. <link xl:href="24__zig-package-manager-deep.xml">24</link></simpara>
+</listitem>
+<listitem>
+<simpara>Avoid <literal>comptime</literal> imports driven by environment variables or timestamps; they break reproducibility because the dependency graph now depends on mutable host state.</simpara>
+</listitem>
+<listitem>
+<simpara>When in doubt, print the module graph via reflection (<literal>@typeInfo(@import("root"))</literal>) in a dedicated debug utility so teammates can inspect the current namespace surface. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara><literal>std.fs.File.stdout().writer(&amp;buffer)</literal> is the canonical way to emit text in Zig 0.15.2; forgetting to flush will truncate output in these examples and in your own tooling.</simpara>
+</listitem>
+<listitem>
+<simpara>Registered module names take precedence over relative files. Choose unique names for vendored code so local helpers do not accidentally shadow dependencies. <link xl:href="24__zig-package-manager-deep.xml">24</link></simpara>
+</listitem>
+<listitem>
+<simpara><literal>@hasDecl</literal> and <literal>@hasField</literal> operate purely at compile time; they do not inspect runtime state. Combine them with explicit policies (flags, options) to avoid misleading “feature present” banners when the hook is gated elsewhere. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Extend <literal>01_root_namespace.zig</literal> so it iterates <literal>@typeInfo(@import("root")).Struct.decls</literal>, printing a sorted table of symbols along with the module each one lives in. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+<listitem>
+<simpara>Modify <literal>02_conditional_import.zig</literal> to gate the debug tools behind a build-option boolean (e.g. <literal>-Ddev-inspect=true</literal>) and document how the build script would plumb that option through <literal>b.addOptions</literal> in Chapter 22. <link xl:href="22__build-system-deep-dive.xml">22</link></simpara>
+</listitem>
+<listitem>
+<simpara>Create a sibling module that uses <literal>comptime { _ = @import("helper.zig"); }</literal> only when <literal>builtin.mode == .Debug</literal>, then write a test that asserts the helper never compiles in ReleaseFast. <link xl:href="13__testing-and-leak-detection.xml">13</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara>In multi-package workspaces, module names must remain globally unique; consider prefixing with the package name to avoid collisions when two dependencies register <literal>@import("log")</literal>. <link xl:href="23__project-library-and-executable-workspace.xml">23</link></simpara>
+</listitem>
+<listitem>
+<simpara>When targeting freestanding environments without a filesystem, configure the build runner to provide synthetic modules via <literal>b.addAnonymousModule</literal>; path-based imports will fail otherwise.</simpara>
+</listitem>
+<listitem>
+<simpara>Disabling <literal>std.start</literal> removes the automatic search for <literal>main</literal>; be prepared to export <literal>_start</literal> manually and handle argument decoding yourself. <link xl:href="19__modules-and-imports-root-builtin-discovery.xml">19</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="summary">
+<title>Summary</title>
+<itemizedlist>
+<listitem>
+<simpara>Module resolution is deterministic: registered namespaces win, filesystem paths serve as a fallback, and every import happens at compile time.</simpara>
+</listitem>
+<listitem>
+<simpara>Discovery triggers extend beyond plain imports—<literal>comptime</literal> blocks, tests, exports, and entry probing all influence which modules join the graph. <link xl:href="19__modules-and-imports-root-builtin-discovery.xml">19</link></simpara>
+</listitem>
+<listitem>
+<simpara>Compile-time guards (<literal>builtin.mode</literal>, build options) and reflection helpers (<literal>@hasDecl</literal>) let you offer rich debug tooling without contaminating release binaries. <link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

@@ -1,0 +1,152 @@
+////
+changes: ["Draft error-handling patterns appendix"]
+examples_compile: yes
+keywords: ["errors", "patterns", "cookbook"]
+last_updated: 2025-11-13
+last_verified: 2025-11-13
+next_chapter: "58__mapping-c-rust-idioms"
+open_questions: []
+previous_chapter: "56__builtins-quick-reference"
+status: draft
+xref_complete: true
+////
+
+= Appendix C. Error-Handling Patterns Cookbook
+:chapter-number: 57
+:chapter-slug: error-handling-patterns-cookbook
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Chapter 4 introduced the mechanics of Zig's error unions, `try`, and `errdefer`; this appendix turns those ideas into a quick-reference cookbook you can consult while sketching new APIs or refactoring existing ones. Each recipe tightens the link between domain-specific error vocabularies and the diagnostic messages your users ultimately see.
+
+Zig 0.15.2 refined diagnostics around integer casts and allocator failures, making it easier to rely on precise error propagation in both debug and release-safe builds.link:https://ziglang.org/download/0.15.1/release-notes.html[v0.15.2]
+
+[[learning-goals]]
+== Learning Goals
+
+* Layer domain-specific error sets on top of standard Zig I/O failures without losing precision.
+* Guard heap-backed transformations with `errdefer` so that every exit path pairs allocations and deallocations.
+* Translate internal error unions into clear, actionable messages for logs and user interfaces.
+
+_Refs: _
+
+[[layered-error-vocabularies]]
+== Layered Error Vocabularies
+
+When a subsystem introduces its own error conditions, refine the vocabulary instead of throwing everything into `anyerror`. The pattern below composes a configuration-specific union from parsing failures and simulated I/O errors so the caller never loses track of `NotFound` versus `InvalidPort`.xref:04__errors-resource-cleanup.adoc[4] The `catch |err| switch` idiom keeps the mapping honest and mirrors how `std.fmt.parseInt` surfaces parsing issues.link:https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig[fmt.zig]
+
+[source,zig]
+----
+include::{sourcedir}/57__error-handling-patterns-cookbook/01_layered_error_sets.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 01_layered_error_sets.zig
+----
+
+.Output
+[source,shell]
+----
+All 3 tests passed.
+----
+
+TIP: Preserve the original error names all the way to your API boundary—callers can branch on `LoadError.PermissionDenied` explicitly, which is more robust than string matching or sentinel values.xref:36__style-and-best-practices.adoc[36]
+
+[[errdefer-patterns]]
+== errdefer for Balanced Cleanup
+
+String assembly and JSON shaping often allocate temporary buffers; forgetting to free them when a validation step fails leads straight to leaks. By pairing `std.ArrayListUnmanaged` with `errdefer`, the next recipe guarantees both success and failure paths clean up correctly while still returning a convenient owned slice.xref:13__testing-and-leak-detection.adoc[13] Every allocation helper used here ships in the standard library, so the same structure scales to more complex builders.link:https://github.com/ziglang/zig/tree/master/lib/std/array_list.zig[array_list.zig]
+
+[source,zig]
+----
+include::{sourcedir}/57__error-handling-patterns-cookbook/02_errdefer_join_upper.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 02_errdefer_join_upper.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+NOTE: Because the standard testing allocator trips on leaks automatically, exercising both the success and error branches doubles as a regression harness for future edits.xref:13__testing-and-leak-detection.adoc[13]
+
+[[reporting-bridges]]
+== Translating Errors for Humans
+
+Even the best-crafted error sets need to land with empathetic language. The final pattern demonstrates how to keep the original `ApiError` for programmatic callers while producing human-readable prose for logs or UI copy.xref:36__style-and-best-practices.adoc[36] `std.io.fixedBufferStream` makes the output deterministic for tests, and the dedicated formatter isolates messaging from control flow.link:https://github.com/ziglang/zig/tree/master/lib/std/log.zig[log.zig]
+
+[source,zig]
+----
+include::{sourcedir}/57__error-handling-patterns-cookbook/03_error_reporting_bridge.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig test 03_error_reporting_bridge.zig
+----
+
+.Output
+[source,shell]
+----
+All 2 tests passed.
+----
+
+TIP: Keep the bridge function pure—it should only depend on the error payload and a writer—so consumers can swap logging backends or capture diagnostics in-memory during tests.xref:36__style-and-best-practices.adoc[36]
+
+[[patterns]]
+== Patterns to Keep on Hand
+
+* Bubble lower-level errors verbatim until the last responsible boundary, then convert them in one place to keep invariants obvious.xref:04__errors-resource-cleanup.adoc[4]
+* Treat `errdefer` as a handshake: every allocation or file open should have a matching cleanup within the same scope.link:https://github.com/ziglang/zig/tree/master/lib/std/fs.zig[fs.zig]
+* Give each public error union a dedicated formatter so documentation and user messaging never drift apart.xref:36__style-and-best-practices.adoc[36]
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* Merging error sets with `||` preserves tags but not payload data; if you need structured payloads, reach for tagged unions instead.
+* Allocator-backed helpers should surface `std.mem.Allocator.Error` directly—callers expect to `try` allocations just like standard library containers.
+* The recipes here assume debug or release-safe builds; in release-fast you may want additional logging for branches that would otherwise fire `unreachable`.xref:37__illegal-behavior-and-safety-modes.adoc[37]
+
+[[exercises]]
+== Exercises
+
+* Extend `loadPort` so it returns a structured configuration object with both host and port, then enumerate the resulting composite error set.xref:04__errors-resource-cleanup.adoc[4]
+* Add a streaming variant of `joinUpperSnippets` that writes to a user-supplied writer instead of allocating, and compare its ergonomics.link:https://github.com/ziglang/zig/tree/master/lib/std/Io.zig[Io.zig]
+* Teach `runAndReport` to redact identifiers before logging by injecting a formatter callback—verify with unit tests that both success and failure paths respect the hook.xref:36__style-and-best-practices.adoc[36]
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* For long-running services, consider wrapping retry loops with exponential backoff and jitter; Chapter 29 revisits the concurrency implications.xref:29__threads-and-atomics.adoc[29]
+* If your error bridge needs localization, store message IDs alongside the error tags and let higher layers format the final string.
+* Embedded targets with tiny allocators may prefer stack-based buffers or fixed `std.BoundedArray` instances over heap-backed arrays to avoid `OutOfMemory`.xref:10__allocators-and-memory-management.adoc[10]

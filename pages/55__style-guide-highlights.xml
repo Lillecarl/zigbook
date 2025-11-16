@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Appendix A. Style Guide Highlights</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Teams stay nimble when their naming, comments, and module layout follow a predictable rhythm. This appendix distills the house style into a quick reference that you can keep open while reviewing pull requests or scaffolding new modules.</simpara>
+<simpara>Zig 0.15.2 tightened formatter output, stabilized doc comment handling, and clarified testing ergonomics; adopting those defaults means less time negotiating conventions and more time verifying behavior.<link xl:href="https://ziglang.org/download/0.15.1/release-notes.html">v0.15.2</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Audit a module quickly by scanning for the canonical ordering of doc comments, types, functions, and tests.</simpara>
+</listitem>
+<listitem>
+<simpara>Describe what “tight error vocabulary” means in Zig and when to prefer bespoke error sets over <literal>anyerror</literal>.</simpara>
+</listitem>
+<listitem>
+<simpara>Wire deterministic tests alongside the code they document without sacrificing readability in larger files.</simpara>
+</listitem>
+</itemizedlist>
+<simpara>_Refs: _</simpara>
+</chapter>
+<chapter xml:id="voice-naming">
+<title>Voice &amp; Naming at a Glance</title>
+<simpara>Readable code starts with alignment between prose and identifiers: the doc comment should speak the same nouns that the exported symbol implements, while helper functions keep verbs short and active.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig">fmt.zig</link> Following this pattern lets reviewers focus on semantics instead of debating word choice.</simpara>
+<section xml:id="naming-comments">
+<title>Naming, Comments, and Writers</title>
+<simpara>This example pairs module-level narration with focused doc comments and uses a fixed buffer writer so the tests never touch the allocator.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io.zig">Io.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 55__style-guide-highlights.adoc - include::example$chapters-data/code/55__style-guide-highlights/01_naming_and_comments.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 01_naming_and_comments.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 1 tests passed.</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Formatting the descriptive sentence before the code encourages readers to skim the type signature and the test together; keeping terminology aligned with the doc comment mirrors the advice in Chapter 36.<link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</tip>
+</section>
+<section xml:id="error-vocabulary">
+<title>Tight Error Vocabularies</title>
+<simpara>Precise error sets balance empathy for callers with lightweight control flow; instead of returning <literal>anyerror</literal>, we list exactly the states the parser can reach and promote them to public API surface.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/math.zig">math.zig</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 55__style-guide-highlights.adoc - include::example$chapters-data/code/55__style-guide-highlights/02_error_vocabulary.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 02_error_vocabulary.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 1 tests passed.</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>The test suite demonstrates that each branch stays reachable, preventing dead strings and teaching consumers which names to <literal>switch</literal> on without reading the implementation.<link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</note>
+</section>
+<section xml:id="module-layout">
+<title>Module Layout Checklist</title>
+<simpara>When a file exports configuration helpers, keep the public façade first, collect private validators underneath, and end with table-driven tests that read as documentation.<link xl:href="12__config-as-data.xml">12</link></simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 55__style-guide-highlights.adoc - include::example$chapters-data/code/55__style-guide-highlights/03_module_layout.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig test 03_module_layout.zig</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">All 2 tests passed.</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Locating the error set at the top keeps the type graph obvious and mirrors how <literal>std.testing</literal> materializes invariants right next to the code that depends on them.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/testing.zig">testing.zig</link></simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="patterns">
+<title>Patterns to Keep on Hand</title>
+<itemizedlist>
+<listitem>
+<simpara>Reserve <literal>//!</literal> for module-level narration and <literal>///</literal> for API documentation so generated references keep a consistent voice across packages.<link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara>Pair every exposed helper with a focused test block; Zig&#8217;s test runner makes colocated tests free, and they double as executable usage examples.</simpara>
+</listitem>
+<listitem>
+<simpara>When the formatter reflows signatures, accept its judgment—consistency between editors and CI was one of the major quality-of-life improvements in 0.15.x.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Do not suppress warnings from <literal>zig fmt</literal>; instead, adjust the code so the defaults succeed and document any unavoidable divergence in your contributing guide.<link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara>Keep project-local lint scripts in sync with upstream Zig releases so chore churn stays low during toolchain upgrades.</simpara>
+</listitem>
+<listitem>
+<simpara>If your API emits container types from <literal>std</literal>, reference their exact field names in doc comments—callers can jump to <literal>zig/lib/std</literal> directly to confirm semantics.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/hash_map.zig">hash_map.zig</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Rewrite one of your recent modules by grouping constants, types, functions, and tests in the order shown above, then run <literal>zig fmt</literal> to confirm the structure stays stable.<link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara>Extend <literal>parseCount</literal> to accept underscores for readability while maintaining a strict error vocabulary; add targeted tests for the new branch.</simpara>
+</listitem>
+<listitem>
+<simpara>Generate HTML documentation for a project using <literal>zig build doc</literal> and review how <literal>//!</literal> and <literal>///</literal> comments surface—tune the prose until the output reads smoothly.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases</title>
+<itemizedlist>
+<listitem>
+<simpara>Some teams prefer fully separated test files; if you do, adopt the same naming and doc comment patterns so search results stay predictable.<link xl:href="36__style-and-best-practices.xml">36</link></simpara>
+</listitem>
+<listitem>
+<simpara>For modules that expose comptime-heavy APIs, include a <literal>test "comptime"</literal> block so these guidelines still deliver runnable coverage.<link xl:href="15__comptime-and-reflection.xml">15</link></simpara>
+</listitem>
+<listitem>
+<simpara>When vendoring third-party code, annotate deviations from this style in a short README so reviewers know the divergence is intentional.<link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Build.zig">Build.zig</link></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

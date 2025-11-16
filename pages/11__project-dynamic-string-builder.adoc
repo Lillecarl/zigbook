@@ -1,0 +1,239 @@
+////
+changes: ["Initial draft for Dynamic String Builder project"]
+examples_compile: yes
+keywords: ["arraylist", "string-builder", "allocators", "stack-fallback"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "12__config-as-data"
+open_questions: []
+previous_chapter: "10__allocators-and-memory-management"
+status: draft
+xref_complete: true
+////
+
+= Project: Dynamic String Builder
+:chapter-number: 11
+:chapter-slug: project-dynamic-string-builder
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+This project turns the raw allocator patterns from the previous chapter into a focused utility: a dynamic string builder that can stitch together reports, logs, and templates without scattering `[]u8` bookkeeping throughout your code. By wrapping `std.ArrayList(u8)` we keep amortized O(1) appends, expose growth metrics for debugging, and make it trivial to hand ownership to callers when the buffer is ready; see xref:10__allocators-and-memory-management.adoc[10] and link:https://github.com/ziglang/zig/tree/master/lib/std/array_list.zig[array_list.zig].
+
+Real programs live on more than one allocator, so we also stress-test the builder against stack buffers, arenas, and the general-purpose allocator. The result is a pattern you can drop into CLIs, templating tasks, or logging subsystems whenever you need flexible but explicit string assembly; see link:https://github.com/ziglang/zig/tree/master/lib/std/heap.zig[heap.zig].
+
+[[learning-goals]]
+== Learning Goals
+
+* Craft a reusable `StringBuilder` wrapper that tracks growth events while leaning on `std.ArrayList(u8)` for storage; see link:chapters-data/code/11__project-dynamic-string-builder/string_builder.zig[string_builder.zig].
+* Drive the builder through `std.io.GenericWriter` so formatted printing composes with ordinary appends; see link:https://github.com/ziglang/zig/tree/master/lib/std/io/writer.zig[writer.zig].
+* Choose between stack buffers, arenas, and heap allocators for dynamic text workflows using `std.heap.stackFallback`.
+
+[[builder-blueprint]]
+== Builder Blueprint
+
+The core utility lives in `string_builder.zig`: a thin struct that stores the caller’s allocator, an `std.ArrayList(u8)` buffer, and a handful of helpers for appends, formatting, and growth telemetry. Each operation goes through your chosen allocator, so handing the builder a different allocator instantly changes its behavior.
+
+[[builder-blueprint-core]]
+=== Rendering structured summaries
+
+To see the builder in action, the following program composes a short report, captures a snapshot of length/capacity/growth, and returns an owned slice to the caller. The builder defers cleanup to `defer builder.deinit()`, so even if `toOwnedSlice` moves the buffer, the surrounding scope stays leak-free.
+
+[source,zig]
+----
+include::{sourcedir}/11__project-dynamic-string-builder/builder_core.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run builder_core.zig
+----
+
+.Output
+[source,shell]
+----
+Report
+======
+source: dynamic builder
+
+* 1. widgets: 7
+* 2. gadgets: 13
+* 3. doodads: 2
+
+summary: appended 3 entries
+
+---
+.{ .length = 88, .capacity = 224, .growth_events = 1 }
+----
+
+TIP: `snapshot()` is cheap enough to sprinkle through your code whenever you need to confirm that a given workload stays inside a particular capacity envelope.
+
+[[allocators-in-action]]
+== Allocators in Action
+
+Allocators define how the builder behaves under pressure: `stackFallback` gives blazing-fast stack writes until the buffer spills, an arena lets you bulk-free whole generations, and the GPA keeps leak detection in play. This section demonstrates how the same builder code adapts to different allocation strategies.
+
+[[allocators-fallback]]
+=== Stack buffer with an arena safety net
+
+Here we wrap the builder in a stack-backed allocator that falls back to an arena once the 256-byte scratch space fills up. The output shows how the small report stays within the stack buffer while the larger one spills into the arena and grows four times; see xref:10__allocators-and-memory-management.adoc[10].
+
+[source,zig]
+----
+include::{sourcedir}/11__project-dynamic-string-builder/allocator_fallback.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run allocator_fallback.zig
+----
+
+.Output
+[source,shell]
+----
+small buffer ->
+label: stack-only
+0: +40 KiB
+1: +16 KiB
+2: +13 KiB
+3: +31 KiB
+4: +44 KiB
+5: +9 KiB
+total: 153 KiB across 6 samples
+stats: .{ .length = 115, .capacity = 128, .growth_events = 1 }
+
+large buffer ->
+label: needs-arena
+0: +35 KiB
+1: +29 KiB
+2: +33 KiB
+3: +14 KiB
+4: +33 KiB
+5: +20 KiB
+6: +36 KiB
+7: +21 KiB
+8: +11 KiB
+9: +58 KiB
+10: +22 KiB
+11: +53 KiB
+12: +21 KiB
+13: +41 KiB
+14: +30 KiB
+15: +20 KiB
+16: +10 KiB
+17: +39 KiB
+18: +46 KiB
+19: +59 KiB
+20: +33 KiB
+21: +8 KiB
+22: +30 KiB
+23: +22 KiB
+24: +28 KiB
+25: +32 KiB
+26: +48 KiB
+27: +50 KiB
+28: +61 KiB
+29: +53 KiB
+30: +30 KiB
+31: +27 KiB
+32: +42 KiB
+33: +24 KiB
+34: +32 KiB
+35: +58 KiB
+36: +60 KiB
+37: +27 KiB
+38: +40 KiB
+39: +17 KiB
+40: +50 KiB
+41: +50 KiB
+42: +42 KiB
+43: +54 KiB
+44: +61 KiB
+45: +10 KiB
+46: +25 KiB
+47: +50 KiB
+total: 1695 KiB across 48 samples
+stats: .{ .length = 618, .capacity = 1040, .growth_events = 4 }
+----
+
+NOTE: `stackFallback(N, allocator)` only tolerates one call to `.get()` per instance; spin up a fresh fallback wrapper when you need multiple concurrent builders.
+
+[[growth-planning]]
+== Growth Planning
+
+The builder records how many times capacity changed, which is perfect for profiling the difference between “append blindly” and “pre-size once.” The next example shows both paths producing identical text while the planned version keeps growth to a single reallocation.
+
+[[growth-planning-compare]]
+=== Pre-sizing vs naive append
+
+[source,zig]
+----
+include::{sourcedir}/11__project-dynamic-string-builder/growth_comparison.zig[]
+----
+
+.Run
+[source,shell]
+----
+$ zig run growth_comparison.zig
+----
+
+.Output
+[source,shell]
+----
+naive -> .{ .length = 186, .capacity = 320, .growth_events = 2 }
+alpha beta gamma delta epsilon zeta eta theta
+iota kappa lambda mu nu xi omicron pi
+rho sigma tau upsilon phi chi psi omega
+aurora borealis cosmos nebula quasar pulsar singularity zenith
+
+planned -> .{ .length = 186, .capacity = 320, .growth_events = 1 }
+alpha beta gamma delta epsilon zeta eta theta
+iota kappa lambda mu nu xi omicron pi
+rho sigma tau upsilon phi chi psi omega
+aurora borealis cosmos nebula quasar pulsar singularity zenith
+----
+
+WARNING: Growth counts depend on allocator policy—switching to a fixed buffer or arena changes when capacity expands. Track both stats and chosen allocator when comparing profiles.
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* `toOwnedSlice` hands ownership to the caller; remember to free with the same allocator you passed into `StringBuilder`.
+* `stackFallback` zeros the scratch buffer every time you call `.get()`; if you need persistent reuse, hold on to the returned allocator instead of calling `.get()` repeatedly.
+* `reset()` clears contents but retains capacity, so prefer it for hot paths that rebuild strings in a tight loop.
+
+[[exercises]]
+== Exercises
+
+* Extend `StringBuilder` with an `appendFormat(comptime fmt, args)` helper powered by `std.io.Writer.Allocating`, then compare its allocations against repeated `writer.print` calls.
+* Build a CLI that streams JSON records into the builder, swapping between GPA and arena allocators via a command-line flag; see xref:05__project-tempconv-cli.adoc[05].
+* Emit a Markdown report to disk by piping the builder into `std.fs.File.writer()` and verifying the final slice matches the written bytes; see xref:06__project-grep-lite.adoc[06] and link:https://github.com/ziglang/zig/tree/master/lib/std/fs.zig[fs.zig].
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Very large strings may allocate gigabytes—guard inputs or stream to disk once `length` crosses a safety threshold.
+* When composing multiple builders, share a single arena or GPA so ownership chains stay simple and leak detection remains accurate.
+* If latency matters more than allocations, emit straight to a buffered writer and use the builder only for sections that truly need random access edits; see xref:09__project-hexdump.adoc[09].

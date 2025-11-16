@@ -1,0 +1,206 @@
+////
+changes: ["Initial draft for Grep-Lite project chapter", "Switch example output channel to buffered stdout writer; clarified notes"]
+examples_compile: yes
+keywords: ["cli", "filesystem", "search"]
+last_updated: 2025-11-03
+last_verified: 2025-11-03
+next_chapter: "07__project-safe-file-copier"
+open_questions: []
+previous_chapter: "05__project-tempconv-cli"
+status: draft
+xref_complete: true
+////
+
+= Project: Grep-Lite
+:chapter-number: 6
+:chapter-slug: project-grep-lite
+:copyright: zigbook
+:doctype: book
+:embedded:
+:experimental:
+:icons: font
+:partnums:
+:pygments-linenums-mode: inline
+:pygments-style: manni
+:safe-mode-level: 0
+:sectanchors:
+:sectids:
+:sectlinks:
+:source-highlighter: pygments
+:sourcedir: example$chapters-data/code
+:webfonts:
+:xrefstyle: short
+:zig-version: 0.15.2
+:linkcss:
+:stylesdir: styles
+:stylesheet: zigbook.css
+
+[[overview]]
+== Overview
+
+Our second project graduates from arithmetic to text processing: a tiny `grep` clone that accepts a search pattern and a file path, then prints only the matching lines. The exercise reinforces argument handling from the previous chapter while introducing file I/O and slice utilities from the standard library. link:https://ziglang.org/documentation/master/#Command-line-flags[#Command-line-flags], link:https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig[File.zig]
+
+Instead of streaming byte-by-byte, we lean on Zig's memory-safe helpers to load the file, split it into lines, and surface hits with straightforward substring checks. Every failure path produces a user-friendly message before exiting, so the tool behaves predictably inside shell scripts—a theme we will carry into the next project. See link:https://ziglang.org/documentation/master/#Command-line-flags[#Command-line-flags] and link:https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig[File.zig] for related APIs, and link:https://ziglang.org/documentation/master/#Error-Handling[#Error-Handling] for error-handling patterns.
+
+[[learning-goals]]
+== Learning Goals
+
+* Implement a command-line parsing routine that supports `--help`, enforces arity, and terminates gracefully on misuse.
+* Use `std.fs.File.readToEndAlloc` and `std.mem.splitScalar` to load and iterate over file contents (see link:https://github.com/ziglang/zig/tree/master/lib/std/mem.zig[mem.zig]).
+* Filter lines with `std.mem.indexOf` and report results via stdout while directing diagnostics to stderr (see link:https://github.com/ziglang/zig/tree/master/lib/std/debug.zig[debug.zig]).
+
+[[section-1]]
+== Building the Search Harness
+
+We start by wiring the CLI front end: allocate arguments, honor `--help`, and confirm that exactly two positional parameters — pattern and path — are present. Any deviation prints a usage banner and exits with code 1, avoiding stack traces while still signaling failure to the caller.
+
+[[section-1-sub-a]]
+=== Validating Arguments and Usage Paths
+
+The skeleton mirrors Chapter 5’s TempConv CLI, but now we emit diagnostics to stderr and exit explicitly whenever input is wrong or a file cannot be opened. `printUsage` keeps the banner in one place, and `std.process.exit` guarantees we stop immediately after the message is written.
+
+[[section-1-sub-b]]
+=== Loading and Splitting the File
+
+Rather than juggling partial reads, we load the file into memory with `File.readToEndAlloc`, capping the size to eight megabytes to guard against unexpected giants. A single call to `std.mem.splitScalar` then produces an iterator over newline-delimited segments, which we trim for Windows-style carriage returns.
+
+==== Understanding std.fs Structure
+
+Before diving into file operations, it's helpful to understand how Zig's filesystem API is organized. The `std.fs` module provides a layered hierarchy that makes file access portable and composable:
+
+[mermaid]
+....
+graph TB
+    subgraph "File System API Hierarchy"
+        CWD["std.fs.cwd()<br/>Returns: Dir"]
+        DIR["Dir type<br/>(fs/Dir.zig)"]
+        FILE["File type<br/>(fs/File.zig)"]
+    end
+    
+    subgraph "Dir Operations"
+        OPENFILE["openFile(path, flags)<br/>Returns: File"]
+        MAKEDIR["makeDir(path)"]
+        OPENDIR["openDir(path)<br/>Returns: Dir"]
+        ITERATE["iterate()<br/>Returns: Iterator"]
+    end
+    
+    subgraph "File Operations"
+        READ["read(buffer)<br/>Returns: bytes read"]
+        READTOEND["readToEndAlloc(allocator, max_size)<br/>Returns: []u8"]
+        WRITE["write(bytes)<br/>Returns: bytes written"]
+        SEEK["seekTo(pos)"]
+        CLOSE["close()"]
+    end
+    
+    CWD --> DIR
+    DIR --> OPENFILE
+    DIR --> MAKEDIR
+    DIR --> OPENDIR
+    DIR --> ITERATE
+    
+    OPENFILE --> FILE
+    OPENDIR --> DIR
+    
+    FILE --> READ
+    FILE --> READTOEND
+    FILE --> WRITE
+    FILE --> SEEK
+    FILE --> CLOSE
+....
+
+**Key concepts:**
+
+* **Entry Point**: `std.fs.cwd()` returns a `Dir` handle representing the current working directory
+* **Dir Type**: Provides directory-level operations like opening files, creating subdirectories, and iterating contents
+* **File Type**: Represents an open file with read/write operations
+* **Chained Calls**: You call `cwd().openFile()` because `openFile()` is a method on the `Dir` type
+
+**Why this structure matters for Grep-Lite:**
+
+```zig
+// This is why we write:
+const file = try std.fs.cwd().openFile(path, .{});
+//                    ^        ^
+//                    |        +-- Method on Dir
+//                    +----------- Returns Dir handle
+```
+
+The two-step process (`cwd()` → `openFile()`) gives you control over *which* directory to open files in. While this example uses the current directory, you could equally use:
+
+* `std.fs.openDirAbsolute()` for absolute paths
+* `dir.openFile()` for files relative to any directory handle
+* `std.fs.openFileAbsolute()` to skip the `Dir` entirely
+
+This composable design makes filesystem code testable (use a temporary directory) and portable (the same API works across platforms).
+
+[[section-2]]
+== Scanning for Matches
+
+Once we own a slice for each line, matching is a one-liner with `std.mem.indexOf`. We reuse the TempConv pattern of reserving stdout for successful output and stderr for diagnostics, making the tool piping-friendly.
+
+[[workflow-1]]
+=== Complete Grep-Lite Listing
+
+The full listing below highlights how the helper functions slot together. Pay attention to the comments that tie each block back to the sections above.
+
+[source,zig]
+----
+
+include::{sourcedir}/06__project-grep-lite/grep_lite.zig[]
+
+----
+
+.Run
+[source,shell]
+----
+$ zig run grep_lite.zig -- pattern grep_lite.zig
+----
+
+.Output
+[source,shell]
+----
+    std.debug.print("usage: grep-lite <pattern> <path>\n", .{});
+        std.debug.print("error: expected a pattern and a path\n", .{});
+    const pattern = args[1];
+        if (std.mem.indexOf(u8, line, pattern) != null) {
+        std.debug.print("no matches for '{s}' in {s}\n", .{ pattern, path });
+----
+
+NOTE: The output shows every source line containing the literal word `pattern`. Your match list will differ when run against other files.
+
+[[workflow-2]]
+=== Detecting Missing Files Gracefully
+
+To keep shell scripts predictable, the tool emits a single-line diagnostic and exits with a non-zero status when a file path cannot be opened.
+
+[source,shell]
+----
+$ zig run grep_lite.zig -- foo missing.txt
+----
+
+.Output
+[source,shell]
+----
+error: unable to open 'missing.txt'
+----
+
+[[notes-caveats]]
+== Notes & Caveats
+
+* `readToEndAlloc` is simple but loads the entire file; add a streaming reader later if you need to handle very large inputs.
+* The size cap prevents runaway allocations. Raise or make it configurable once you trust your deployment environment.
+* This example uses a buffered stdout writer for matches and `std.debug.print` for diagnostics to stderr; we flush via the writer's `end()` at exit (see link:https://github.com/ziglang/zig/tree/master/lib/std/Io.zig[Io.zig]).
+
+[[exercises]]
+== Exercises
+
+* Accept multiple files on the command line and print a `path:line` prefix for each match (see link:https://ziglang.org/documentation/master/#for[#for]).
+* Add a `--ignore-case` flag by normalizing both the pattern and each line with `std.ascii.toLower` (see link:https://github.com/ziglang/zig/tree/master/lib/std/ascii.zig[ascii.zig]).
+* Support regular expressions by integrating a third-party matcher after loading the entire buffer.
+
+[[caveats-alternatives-edge-cases]]
+== Alternatives & Edge Cases
+
+* Windows files often end lines with `\r\n`; trimming the carriage return keeps substring checks clean.
+* Empty patterns currently match every line. Introduce an explicit guard if you prefer to treat an empty string as misuse.
+* To integrate with larger builds, replace `zig run` with a `zig build-exe` step and package the binary on your `PATH`.

@@ -1,0 +1,21 @@
+////
+This is the Zig Programming Language Book's README file.
+////
+
+IMPORTANT: *link:https://zigbook.net[The Zigbook]* intentionally contains *no* AI-generated content—it is hand-written, carefully curated, and continuously updated to reflect the latest language features and best practices.
+
+*A Quick Note from the Author:*
+
+> Hello, reader! 
+>
+> Thank you for choosing the Zigbook as your guide to learning Zig. I would like to formally invite the Zig community to contribute to the Zigbook. Whether you spot a typo, want to improve an explanation, or have a better way to demonstrate a concept, your contributions help everyone who learns from this book.
+>
+> You can contribute by opening issues or pull requests link:https://github.com/zigbook/zigbook[here]. 
+>
+> *Please Note:* I review every submission personally to ensure accuracy and clarity. Together, we can make this resource even better for future Zig developers.
+>
+> -- link:https://github.com/zigbook[@zigbook]
+
+The Zigbook was initially written by link:https://github.com/zigbook[@zigbook], an experienced Systems programmer and Zig community member to fill gaps in the existing resources, and share that knowledge with others. 
+
+It has since grown into a a comprehensive guide to the Zig programming language, structured as a journey from fundamentals to advanced systems programming. It is designed for developers who want to *understand*, not just use; who value transparency over magic and precision over convenience.  

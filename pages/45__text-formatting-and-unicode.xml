@@ -1,0 +1,371 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Text, Formatting, and Unicode</title>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>After mastering collections for structured data, <link xl:href="44__collections-and-algorithms.xml">44</link> you now turn to text—the fundamental medium of human-computer interaction. This chapter explores <literal>std.fmt</literal> for formatting and parsing, <literal>std.ascii</literal> for ASCII character operations, <literal>std.unicode</literal> for UTF-8/UTF-16 handling, and encoding utilities like <literal>base64</literal>. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt.zig">fmt.zig</link> <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/ascii.zig">ascii.zig</link></simpara>
+<simpara>Unlike high-level languages that hide encoding complexities, Zig exposes the mechanics: you choose between <literal>[]const u8</literal> (byte slices) and proper Unicode code point iteration, control number formatting precision, and handle encoding errors explicitly.</simpara>
+<simpara>Text processing in Zig demands awareness of byte vs. character boundaries, allocator usage for dynamic formatting, and the performance implications of different string operations. By chapter&#8217;s end, you&#8217;ll format numbers with custom precision, parse integers and floats safely, manipulate ASCII efficiently, navigate UTF-8 sequences, and encode binary data for transport—all with Zig&#8217;s characteristic explicitness and zero hidden costs. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/unicode.zig">unicode.zig</link></simpara>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Format values with <literal>Writer.print()</literal> using format specifiers for integers, floats, and custom types. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/Writer.zig">Writer.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Parse strings into integers (<literal>parseInt</literal>) and floats (<literal>parseFloat</literal>) with proper error handling.</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>std.ascii</literal> for character classification (<literal>isDigit</literal>, <literal>isAlpha</literal>, <literal>toUpper</literal>, <literal>toLower</literal>).</simpara>
+</listitem>
+<listitem>
+<simpara>Navigate UTF-8 sequences with <literal>std.unicode</literal> and understand code point vs. byte distinctions.</simpara>
+</listitem>
+<listitem>
+<simpara>Encode and decode Base64 data for binary-to-text transformations. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/base64.zig">base64.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Implement custom formatters for user-defined types using the <literal>{f}</literal> specifier in Zig 0.15.2.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="formatting-basics">
+<title>Formatting with std.fmt</title>
+<simpara>Zig&#8217;s formatting revolves around <literal>Writer.print(fmt, args)</literal>, which writes formatted output to any <literal>Writer</literal> implementation. Format strings use <literal>{}</literal> placeholders with optional specifiers: <literal>{d}</literal> for decimal, <literal>{x}</literal> for hex, <literal>{s}</literal> for strings, <literal>{any}</literal> for debug representation, and <literal>{f}</literal> for custom formatters.</simpara>
+<section xml:id="print-basic">
+<title>Basic Formatting</title>
+<simpara>The simplest pattern: capture a buffer with <literal>std.io.fixedBufferStream</literal>, then <literal>print</literal> into it.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/format_basic.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe format_basic.zig &amp;&amp; ./format_basic</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Formatted: Answer=42, pi=3.14</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>std.io.fixedBufferStream</literal> provides a <literal>Writer</literal> backed by a fixed buffer. No allocation needed. For dynamic output, use <literal>std.ArrayList(u8).writer()</literal>. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/Io/fixed_buffer_stream.zig">fixed_buffer_stream.zig</link></simpara>
+</tip>
+</section>
+<section xml:id="format-specifiers">
+<title>Format Specifiers</title>
+<simpara>Zig&#8217;s format specifiers control number bases, precision, alignment, and padding.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/format_specifiers.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe format_specifiers.zig &amp;&amp; ./format_specifiers</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Decimal: 255
+Hexadecimal (lowercase): ff
+Hexadecimal (uppercase): FF
+Binary: 11111111
+Octal: 377
+Float with 2 decimals: 3.14
+Scientific notation: 1.23e2
+Padded: 00042
+Right-aligned:    42</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Use <literal>{d}</literal> for decimal, <literal>{x}</literal> for hex, <literal>{b}</literal> for binary, <literal>{o}</literal> for octal. Precision (<literal>.N</literal>) and width work with floats and integers. Padding with <literal>0</literal> creates zero-filled fields.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="parsing">
+<title>Parsing Strings</title>
+<simpara>Zig provides <literal>parseInt</literal> and <literal>parseFloat</literal> for converting text to numbers, returning errors for invalid input rather than crashing or silently failing.</simpara>
+<section xml:id="parse-int">
+<title>Parsing Integers</title>
+<simpara><literal>parseInt(T, buf, base)</literal> converts a string to an integer of type <literal>T</literal> in the specified base (2-36, or 0 for auto-detection).</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/parse_int.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe parse_int.zig &amp;&amp; ./parse_int</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Parsed decimal: 42
+Parsed hex: 255
+Parsed binary: 7
+Auto-detected (0x): 4660
+Parse error: InvalidCharacter</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara><literal>parseInt</literal> returns <literal>error{Overflow, InvalidCharacter}</literal>. Always handle these explicitly or propagate with <literal>try</literal>. Base 0 auto-detects <literal>0x</literal> (hex), <literal>0o</literal> (octal), <literal>0b</literal> (binary) prefixes.</simpara>
+</important>
+</section>
+<section xml:id="parse-float">
+<title>Parsing Floats</title>
+<simpara><literal>parseFloat(T, buf)</literal> converts a string to a floating-point number, handling scientific notation and special values (<literal>nan</literal>, <literal>inf</literal>).</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/parse_float.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe parse_float.zig &amp;&amp; ./parse_float</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Parsed: 3.14159
+Scientific: 123000
+Special (inf): inf</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>parseFloat</literal> supports decimal notation (<literal>3.14</literal>), scientific notation (<literal>1.23e5</literal>), hexadecimal floats (<literal>0x1.8p3</literal>), and special values (<literal>nan</literal>, <literal>inf</literal>, <literal>-inf</literal>). <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fmt/parse_float.zig">parse_float.zig</link></simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="ascii-operations">
+<title>ASCII Character Operations</title>
+<simpara><literal>std.ascii</literal> provides fast character classification and case conversion for 7-bit ASCII. Functions gracefully handle values outside the ASCII range by returning <literal>false</literal> or leaving them unchanged.</simpara>
+<section xml:id="ascii-classification">
+<title>Character Classification</title>
+<simpara>Test whether characters are digits, letters, whitespace, etc.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/ascii_classify.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe ascii_classify.zig &amp;&amp; ./ascii_classify</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">'A': alpha=true, digit=false, upper=true
+'5': alpha=false, digit=true, upper=false
+' ': alpha=false, digit=false, whitespace=true</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>ASCII functions operate on bytes (<literal>u8</literal>). Non-ASCII bytes (&gt;127) return <literal>false</literal> for classification checks.</simpara>
+</note>
+</section>
+<section xml:id="ascii-case">
+<title>Case Conversion</title>
+<simpara>Convert between uppercase and lowercase for ASCII characters.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/ascii_case.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe ascii_case.zig &amp;&amp; ./ascii_case</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Original: Hello, World!
+Uppercase: HELLO, WORLD!
+Lowercase: hello, world!</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara><literal>std.ascii</literal> functions operate byte-by-byte and only affect ASCII characters. For full Unicode case mapping, use dedicated Unicode libraries or manually handle UTF-8 sequences.</simpara>
+</important>
+</section>
+</chapter>
+<chapter xml:id="unicode">
+<title>Unicode and UTF-8</title>
+<simpara>Zig strings are <literal>[]const u8</literal> byte slices, typically UTF-8 encoded. <literal>std.unicode</literal> provides utilities for validating UTF-8, decoding code points, and converting between UTF-8 and UTF-16.</simpara>
+<section xml:id="utf8-validation">
+<title>UTF-8 Validation</title>
+<simpara>Check whether a byte sequence is valid UTF-8.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/utf8_validate.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe utf8_validate.zig &amp;&amp; ./utf8_validate</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Valid UTF-8: Hello, 世界
+Invalid UTF-8 detected</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara>Use <literal>std.unicode.utf8ValidateSlice</literal> to verify entire strings. Invalid UTF-8 can cause undefined behavior in code that assumes well-formed sequences.</simpara>
+</tip>
+</section>
+<section xml:id="utf8-iteration">
+<title>Iterating Code Points</title>
+<simpara>Decode UTF-8 byte sequences into Unicode code points using <literal>std.unicode.Utf8View</literal>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/utf8_iterate.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe utf8_iterate.zig &amp;&amp; ./utf8_iterate</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Code point: U+0048 (H)
+Code point: U+0065 (e)
+Code point: U+006C (l)
+Code point: U+006C (l)
+Code point: U+006F (o)
+Code point: U+002C (,)
+Code point: U+0020 ( )
+Code point: U+4E16 (世)
+Code point: U+754C (界)
+Byte count: 13, Code point count: 9</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>UTF-8 is variable-width: ASCII characters are 1 byte, but many Unicode characters require 2-4 bytes. Always iterate code points when character semantics matter, not bytes.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="base64">
+<title>Base64 Encoding</title>
+<simpara>Base64 encodes binary data as printable ASCII, useful for embedding binary in text formats (JSON, XML, URLs). Zig provides standard, URL-safe, and custom Base64 variants.</simpara>
+<section xml:id="base64-basic">
+<title>Encoding and Decoding</title>
+<simpara>Encode binary data to Base64 and decode it back.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/base64_basic.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe base64_basic.zig &amp;&amp; ./base64_basic</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Original: Hello, World!
+Encoded: SGVsbG8sIFdvcmxkIQ==
+Decoded: Hello, World!</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>std.base64.standard.Encoder</literal> and <literal>.Decoder</literal> provide encode/decode methods. The <literal>==</literal> padding is optional and can be controlled with encoder options.</simpara>
+</tip>
+</section>
+</chapter>
+<chapter xml:id="custom-formatters">
+<title>Custom Formatters</title>
+<simpara>Implement the <literal>format</literal> function for your types to control how they&#8217;re printed with <literal>Writer.print()</literal>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/custom_formatter.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe custom_formatter.zig &amp;&amp; ./custom_formatter</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Point: (10, 20)</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>In Zig 0.15.2, the <literal>format</literal> method signature is simplified to: <literal>pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void</literal>. Use the <literal>{f}</literal> format specifier to invoke custom formatters (e.g., <literal>"{f}"</literal>, not <literal>"{}"</literal>).</simpara>
+</note>
+</chapter>
+<chapter xml:id="bufprint">
+<title>Formatting to Buffers</title>
+<simpara>For stack-allocated formatting without allocation, use <literal>std.fmt.bufPrint</literal>.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/bufprint.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe bufprint.zig &amp;&amp; ./bufprint</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Formatted: x=42, y=3.14</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara><literal>bufPrint</literal> returns <literal>error.NoSpaceLeft</literal> if the buffer is too small. Always size buffers appropriately or handle the error.</simpara>
+</important>
+</chapter>
+<chapter xml:id="allocprint">
+<title>Dynamic Formatting with Allocation</title>
+<simpara>For dynamically sized output, use <literal>std.fmt.allocPrint</literal> which allocates and returns a formatted string.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 45__text-formatting-and-unicode.adoc - include::example$chapters-data/code/45__text-formatting-and-unicode/allocprint.zig[]</programlisting>
+<formalpara>
+<title>Build and Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ zig build-exe allocprint.zig &amp;&amp; ./allocprint</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">Dynamic: The answer is 42</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>allocPrint</literal> returns a slice you must free with <literal>allocator.free(result)</literal>. Use this when output size is unpredictable.</simpara>
+</tip>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Write a CSV parser using <literal>std.mem.split</literal> and <literal>parseInt</literal> to read rows of numbers from a comma-separated file. <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/mem.zig">mem.zig</link></simpara>
+</listitem>
+<listitem>
+<simpara>Implement a hex dump utility that formats binary data as hexadecimal with ASCII representation (similar to <literal>hexdump -C</literal>).</simpara>
+</listitem>
+<listitem>
+<simpara>Create a string validation function that checks if a string contains only ASCII printable characters, rejecting control codes and non-ASCII bytes.</simpara>
+</listitem>
+<listitem>
+<simpara>Build a simple URL encoder/decoder using Base64 for the encoding portion and custom logic for percent-encoding special characters.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Caveats, alternatives, edge cases</title>
+<itemizedlist>
+<listitem>
+<simpara><emphasis role="strong">UTF-8 vs. bytes</emphasis>: Zig strings are <literal>[]const u8</literal>. Always clarify whether you&#8217;re working with bytes (indexing) or code points (semantic characters). Mismatched assumptions cause bugs with multi-byte characters.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Locale-sensitive operations</emphasis>: <literal>std.ascii</literal> and <literal>std.unicode</literal> don&#8217;t handle locale-specific case mapping or collation. For Turkish <literal>i</literal> vs. <literal>I</literal> or locale-aware sorting, you need external libraries.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Float formatting precision</emphasis>: <literal>parseFloat</literal> round-trips through text may lose precision for very large or very small numbers. For exact decimal representation, use fixed-point arithmetic or dedicated decimal libraries.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Base64 variants</emphasis>: Standard Base64 uses <literal>+/</literal>, URL-safe uses <literal>-_</literal>. Choose the correct encoder/decoder for your use case (<literal>std.base64.standard</literal> vs. <literal>std.base64.url_safe_no_pad</literal>).</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Format string safety</emphasis>: Format strings are <literal>comptime</literal>-checked, but runtime-constructed format strings won&#8217;t benefit from compile-time validation. Avoid building format strings dynamically when possible.</simpara>
+</listitem>
+<listitem>
+<simpara><emphasis role="strong">Writer interface</emphasis>: All formatting functions accept <literal>anytype</literal> Writers, allowing output to files, sockets, ArrayLists, or custom destinations. Ensure your Writer implements <literal>write(self, bytes: []const u8) !usize</literal>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>

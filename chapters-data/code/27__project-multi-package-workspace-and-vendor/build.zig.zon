@@ -1,0 +1,29 @@
+.{
+    // Package identifier following Zig naming conventions
+    .name = .workspace_dashboard,
+    
+    // Semantic version for this workspace (major.minor.patch)
+    .version = "0.1.0",
+    
+    // Minimum Zig compiler version required to build this project
+    .minimum_zig_version = "0.15.2",
+    
+    // Explicit list of paths included in the package for distribution and source tracking
+    // This controls what gets packaged when this project is published or vendored
+    .paths = .{
+        "build.zig",        // Main build script
+        "build.zig.zon",    // This manifest file
+        "deps.zig",         // Centralized dependency configuration
+        "app",              // Application entry point and executable code
+        "packages",         // Local workspace packages (libA, libB)
+        "vendor",           // Vendored third-party dependencies (palette)
+    },
+    
+    // External dependencies fetched from remote sources
+    // Empty in this workspace as all dependencies are local/vendored
+    .dependencies = .{},
+    
+    // Cryptographic hash for integrity verification of the package manifest
+    // Automatically computed by the Zig build system
+    .fingerprint = 0x88b8c5fe06a5c6a1,
+}

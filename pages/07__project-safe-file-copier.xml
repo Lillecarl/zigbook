@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title>Project</title>
+<subtitle>Safe File Copier</subtitle>
+<date>2025-11-15</date>
+<copyright>
+<holder>zigbook</holder>
+</copyright>
+</info>
+<chapter xml:id="overview">
+<title>Overview</title>
+<simpara>Our third project turns file I/O up a notch: build a small, robust file copier that is safe by default, emits clear diagnostics, and cleans up after itself. We’ll connect the dots from Chapter 4’s <literal>defer</literal>/<literal>errdefer</literal> patterns to real-world error handling while showcasing the standard library’s atomic copy helpers; see <link xl:href="04__errors-resource-cleanup.xml#overview">04</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/Dir.zig">Dir.zig</link>.</simpara>
+<simpara>Two approaches illustrate the trade-offs:</simpara>
+<itemizedlist>
+<listitem>
+<simpara>High-level: a single call to <literal>std.fs.Dir.copyFile</literal> performs an atomic copy and preserves file mode.</simpara>
+</listitem>
+<listitem>
+<simpara>Manual streaming: open, read, and write with <literal>defer</literal> and <literal>errdefer</literal>, deleting partial outputs if anything fails, as described in <link xl:href="https://ziglang.org/documentation/master/#defer-and-errdefer">#defer and errdefer</link> and <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/fs/File.zig">File.zig</link>.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="learning-goals">
+<title>Learning Goals</title>
+<itemizedlist>
+<listitem>
+<simpara>Design a CLI that refuses to overwrite existing files unless explicitly forced, as described in <link xl:href="https://ziglang.org/documentation/master/#Command-line-flags">#Command-line-flags</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Use <literal>defer</literal>/<literal>errdefer</literal> to guarantee resource cleanup and remove partial files on failure.</simpara>
+</listitem>
+<listitem>
+<simpara>Choose between <literal>Dir.copyFile</literal> for atomic convenience and manual streaming for fine-grained control.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="section-1">
+<title>Correctness First: Safe-by-Default CLI</title>
+<simpara>Clobbering a user’s data is unforgivable. This tool adopts a conservative stance: unless <literal>--force</literal> is provided, an existing destination aborts the copy. We also validate that the source is a regular file and keep stdout silent on success so scripts can treat “no output” as a good sign, as described in <link xl:href="https://ziglang.org/documentation/master/#Error-Handling">#Error-Handling</link>.</simpara>
+<section xml:id="section-1-sub-a">
+<title>Aborting on Existing Destinations</title>
+<simpara>We probe the destination path first. If present and <literal>--force</literal> is absent, we print a single-line diagnostic and exit with a non-zero status. This mirrors common Unix utilities and makes failures unambiguous.</simpara>
+</section>
+</chapter>
+<chapter xml:id="section-2">
+<title>Atomic Copy in One Call</title>
+<simpara>Leverage the standard library when possible. <literal>Dir.copyFile</literal> uses a temporary file and renames it into place, which means callers never observe a partially written destination even if the process crashes mid-copy. File mode is preserved by default; timestamps are handled by <literal>updateFile</literal> if you need them, which we mention below.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 07__project-safe-file-copier.adoc - include::example$chapters-data/code/07__project-safe-file-copier/safe_copy.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ printf 'hello, copier!\n' &gt; from.txt
+$ zig run safe_copy.zig -- from.txt to.txt</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">(no output)</programlisting>
+</para>
+</formalpara>
+<tip>
+<simpara><literal>copyFile</literal> overwrites existing files. Our wrapper checks for existence first and requires <literal>--force</literal> to clobber. Prefer <literal>Dir.updateFile</literal> if you want to also preserve atime/mtime.</simpara>
+</tip>
+<section xml:id="workflow-1">
+<title>Overwrite with Intent</title>
+<simpara>When an output already exists, demonstrate explicit overwrite:</simpara>
+<programlisting language="shell" linenumbering="unnumbered">$ printf 'v1\n' &gt; from.txt
+$ printf 'old\n' &gt; to.txt
+$ zig run safe_copy.zig -- from.txt to.txt
+error: destination exists; pass --force to overwrite
+$ zig run safe_copy.zig -- --force from.txt to.txt</programlisting>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">error: destination exists; pass --force to overwrite
+(no output)</programlisting>
+</para>
+</formalpara>
+<note>
+<simpara>Success remains quiet by design; combine with <literal>echo $?</literal> to consume status codes in scripts.</simpara>
+</note>
+</section>
+</chapter>
+<chapter xml:id="section-3">
+<title>Manual Streaming with defer/errdefer</title>
+<simpara>For fine-grained control (or as a learning exercise), wire a <literal>Reader</literal> to a <literal>Writer</literal> and stream the bytes yourself. The crucial bit is <literal>errdefer</literal> to remove the destination if anything goes wrong after creation—this prevents leaving a truncated file behind.</simpara>
+<programlisting language="zig" linenumbering="unnumbered">Unresolved directive in 07__project-safe-file-copier.adoc - include::example$chapters-data/code/07__project-safe-file-copier/copy_stream.zig[]</programlisting>
+<formalpara>
+<title>Run</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">$ printf 'stream me\n' &gt; src.txt
+$ zig run copy_stream.zig -- src.txt dst.txt</programlisting>
+</para>
+</formalpara>
+<formalpara>
+<title>Output</title>
+<para>
+<programlisting language="shell" linenumbering="unnumbered">(no output)</programlisting>
+</para>
+</formalpara>
+<important>
+<simpara>When creating the destination with <literal>.exclusive = true</literal>, the open fails if the file already exists. That, plus <literal>errdefer deleteFile</literal>, gives strong safety guarantees without races in typical single-process scenarios.</simpara>
+</important>
+</chapter>
+<chapter xml:id="notes-caveats">
+<title>Notes &amp; Caveats</title>
+<itemizedlist>
+<listitem>
+<simpara>Atomic semantics: <literal>Dir.copyFile</literal> creates a temporary file and renames it into place, avoiding partial reads by other processes. On older Linux kernels, power loss may leave a temp file; see the function’s doc comment for details.</simpara>
+</listitem>
+<listitem>
+<simpara>Preserving timestamps: prefer <literal>Dir.updateFile</literal> when you need atime/mtime to match the source, in addition to content and mode.</simpara>
+</listitem>
+<listitem>
+<simpara>Performance hints: the <literal>Writer</literal> interface uses platform accelerations (<literal>sendfile</literal>, <literal>copy_file_range</literal>, or <literal>fcopyfile</literal>) when available, falling back to buffered loops; see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/posix.zig">posix.zig</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>CLI lifetimes: duplicate <literal>args</literal> strings before freeing them to avoid dangling <literal>[]u8</literal> slices (both examples use <literal>allocator.dupe</literal>); see <link xl:href="https://github.com/ziglang/zig/tree/master/lib/std/process.zig">process.zig</link>.</simpara>
+</listitem>
+<listitem>
+<simpara>Sanity checks: open the source first, then <literal>stat()</literal> it and require <literal>kind == .file</literal> to reject directories and special files.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="exercises">
+<title>Exercises</title>
+<itemizedlist>
+<listitem>
+<simpara>Add a <literal>--no-clobber</literal> flag that forces an error even when <literal>--force</literal> is also present—then emit a helpful message suggesting which one to remove.</simpara>
+</listitem>
+<listitem>
+<simpara>Implement <literal>--preserve-times</literal> by switching to <literal>Dir.updateFile</literal> and verifying via <literal>stat</literal> that timestamps match.</simpara>
+</listitem>
+<listitem>
+<simpara>Teach the tool to copy file permissions from a numeric mode override (e.g., <literal>--mode=0644</literal>) using <literal>CopyFileOptions.override_mode</literal></simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="caveats-alternatives-edge-cases">
+<title>Alternatives &amp; Edge Cases:</title>
+<itemizedlist>
+<listitem>
+<simpara>Copying special files (directories, fifos, devices) is intentionally rejected in these examples; handle them explicitly or skip.</simpara>
+</listitem>
+<listitem>
+<simpara>Cross-filesystem moves: copying plus <literal>deleteFile</literal> is safer than <literal>rename</literal> when devices differ; Zig’s helpers do the right thing given a content copy.</simpara>
+</listitem>
+<listitem>
+<simpara>Very large files: prefer the high-level copy first; manual loops should chunk reads and handle short writes carefully if you don’t use the <literal>Writer</literal> interface.</simpara>
+</listitem>
+</itemizedlist>
+</chapter>
+</book>
