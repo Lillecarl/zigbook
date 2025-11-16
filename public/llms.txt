@@ -4,7 +4,7 @@ project: Zigbook – The Zig Programming Language Book
 url: https://zigbook.net
 repository: https://github.com/zigbook/zigbook
 license: MIT (see LICENSE in repository)
-generated_at: 2025-11-16T00:45:15.124Z
+generated_at: 2025-11-16T01:38:33.337Z
 zig_version: 0.15.2
 
 notes:
