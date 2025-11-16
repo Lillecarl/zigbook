@@ -1,6 +1,14 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import './globals.css'
 import CommandPaletteProvider from '@/components/CommandPaletteProvider'
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 5,
+  userScalable: true,
+  themeColor: '#0f172a',
+}
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://zigbook.net'),
@@ -34,7 +42,6 @@ export const metadata: Metadata = {
       'Zigbook is a comprehensive, open-source guide to the Zig programming language, packed with hands-on chapters, projects, and real-world examples.',
     images: ['/og-zigbook.webp'],
   },
-  themeColor: '#0f172a',
   icons: {
     icon: '/favicon.svg',
     shortcut: '/favicon.svg',
