@@ -4,7 +4,7 @@ project: Zigbook – The Zig Programming Language Book
 url: https://zigbook.net
 repository: https://github.com/zigbook/zigbook
 license: MIT (see LICENSE in repository)
-generated_at: 2025-11-16T08:47:05.234Z
+generated_at: 2025-11-17T13:18:51.624Z
 zig_version: 0.15.2
 
 notes:
@@ -12625,7 +12625,7 @@ TextKit demonstrates several professional patterns worth adopting.
 [section_id: overview]
 [section_url: https://zigbook.net/chapters/24__zig-package-manager-deep#overview]
 
-Chapter 22 introduced the build system’s API for creating artifacts and configuring builds; Chapter 23 demonstrated workspace organization with libraries and executables.This chapter completes the build system foundation by examining dependency management—how Zig projects declare, fetch, verify, cache, and integrate external packages through the `build.zig.zon` manifest and the package manager built into the Zig toolchain. Build.zig (https://github.com/ziglang/zig/tree/master/lib/std/Build.zig)
+Chapter 22 introduced the build system’s API for creating artifacts and configuring builds; Chapter 23 demonstrated workspace organization with libraries and executables. This chapter completes the build system foundation by examining dependency management—how Zig projects declare, fetch, verify, cache, and integrate external packages through the `build.zig.zon` manifest and the package manager built into the Zig toolchain. Build.zig (https://github.com/ziglang/zig/tree/master/lib/std/Build.zig)
 
 Unlike traditional package managers that operate as separate tools with their own metadata formats and resolution algorithms, Zig’s package manager is an integral part of the build system itself, leveraging the same deterministic caching infrastructure used for compilation artifacts (see Cache.zig (https://github.com/ziglang/zig/tree/master/lib/std/Build/Cache.zig)). The `build.zig.zon` file—a Zig Object Notation (ZON) document—serves as the single source of truth for package metadata, dependency declarations, and inclusion rules, while `build.zig` orchestrates how those dependencies integrate into your project’s module graph. 20 (20__concept-primer-modules-vs-programs-vs-packages-vs-libraries.xml)
 By the end of this chapter, you will understand the full lifecycle of a dependency: from declaration in `build.zig.zon`, through cryptographic verification and caching, to module registration and import in your Zig source code. You will also learn patterns for reproducible builds, lazy dependency loading, and local development workflows that balance convenience with security.
