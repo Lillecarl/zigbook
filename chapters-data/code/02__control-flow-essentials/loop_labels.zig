@@ -6,7 +6,7 @@ const std = @import("std");
 /// Searches for the first row where both elements are even numbers.
 /// Uses a while loop with continue statements to skip invalid rows.
 /// Returns the zero-based index of the matching row, or null if none found.
-fn findAllEvenPair(rows: []const [2]i32) ?usize {
+fn findFirstEvenPair(rows: []const [2]i32) ?usize {
     // Track current row index during iteration
     var row: usize = 0;
     // while-else construct: break provides value, else provides fallback
@@ -33,7 +33,7 @@ pub fn main() !void {
     };
 
     // Search for first all-even pair and report result
-    if (findAllEvenPair(&grid)) |row| {
+    if (findFirstEvenPair(&grid)) |row| {
         std.debug.print("first all-even row: {d}\n", .{row});
     } else {
         std.debug.print("no all-even rows\n", .{});
