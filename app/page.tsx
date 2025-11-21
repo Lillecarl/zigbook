@@ -1,30 +1,16 @@
-import Link from 'next/link'
 import AnimatedTerminal from '@/components/AnimatedTerminal'
-import ThemeToggle from '@/components/ThemeToggle'
 import ZigLogo from '@/components/ZigLogo'
 import HeroBackground from '@/components/HeroBackground'
+import Footer from '@/components/Footer'
+import Navbar from '@/components/Navbar'
 
 export default function Home() {
   return (
     <div className="min-h-screen bg-base-200 relative overflow-hidden w-full">
       <HeroBackground />
 
-      {/* Navbar */}
-      <div className="navbar bg-base-100/80 backdrop-blur border-b border-base-300/40 relative z-20 px-2 sm:px-4">
-        <div className="flex-1">
-          <a className="btn btn-ghost px-2 sm:px-3 text-base sm:text-lg md:text-xl font-semibold tracking-tight">
-            Zigbook
-          </a>
-        </div>
-        <div className="flex-none gap-1 sm:gap-2">
-          <Link
-            href="/chapters/00__zigbook_introduction"
-            className="btn btn-outline btn-xs sm:btn-sm md:btn-md border-accent/60 text-accent hover:border-accent hover:bg-accent/10 text-xs sm:text-sm md:text-base"
-          >
-            Chapters
-          </Link>
-          <ThemeToggle />
-        </div>
+      <div className="relative z-20">
+        <Navbar />
       </div>
 
       {/* Hero Section */}
@@ -76,6 +62,8 @@ export default function Home() {
           </div>
         </section>
       </main>
+
+      <Footer />
     </div>
   )
 }

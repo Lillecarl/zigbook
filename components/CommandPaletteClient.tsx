@@ -109,6 +109,17 @@ export default function CommandPaletteClient({ chapters, children }: CommandPale
         },
       },
       {
+        id: 'page:playground',
+        label: 'Playground',
+        subtitle: '/playground',
+        type: 'page',
+        icon: 'page',
+        action: () => {
+          router.push('/playground')
+          close()
+        },
+      },
+      {
         id: 'page:contribute',
         label: 'Contribute',
         subtitle: '/contribute',
@@ -116,6 +127,28 @@ export default function CommandPaletteClient({ chapters, children }: CommandPale
         icon: 'page',
         action: () => {
           router.push('/contribute')
+          close()
+        },
+      },
+      {
+        id: 'page:privacy',
+        label: 'Privacy Policy',
+        subtitle: '/privacy-policy',
+        type: 'page',
+        icon: 'page',
+        action: () => {
+          router.push('/privacy-policy')
+          close()
+        },
+      },
+      {
+        id: 'page:terms',
+        label: 'Terms of Service',
+        subtitle: '/terms-of-service',
+        type: 'page',
+        icon: 'page',
+        action: () => {
+          router.push('/terms-of-service')
           close()
         },
       },

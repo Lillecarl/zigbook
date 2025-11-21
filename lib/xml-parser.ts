@@ -66,8 +66,23 @@ export async function getAllChapters(): Promise<Chapter[]> {
     }).filter(Boolean) as Chapter[]
 }
 
-export async function getChapterContent(chapterId: string) {
-    // Check if XML version exists
+const fallbackTitleFromSlug = (slug?: string): string => {
+    if (typeof slug === 'string' && slug.length > 0) {
+        return slug.replace(/^\d{2}__/, '').replace(/-/g, ' ')
+    }
+    return 'Untitled'
+}
+
+export async function getChapterContent(chapterId?: string) {
+    const fallbackTitle = fallbackTitleFromSlug(chapterId)
+
+    if (!chapterId) {
+        return {
+            title: fallbackTitle,
+            chapters: [],
+        }
+    }
+
     const xmlPath = path.join(process.cwd(), 'pages', `${chapterId}.xml`)
 
     try {
@@ -76,8 +91,8 @@ export async function getChapterContent(chapterId: string) {
     } catch {
         // XML doesn't exist yet, return placeholder
         return {
-            title: chapterId.replace(/^\d{2}__/, '').replace(/-/g, ' '),
-            chapters: []
+            title: fallbackTitle,
+            chapters: [],
         }
     }
 }

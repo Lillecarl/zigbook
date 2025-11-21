@@ -123,6 +123,73 @@ code[class*="language-"] .token.label {
   @apply font-mono text-xs px-1.5 py-0.5 rounded-md bg-base-300/60 text-base-content;
 }
 
+@layer components {
+  .zigbook-editor-shell .cm-editor {
+    height: 100%;
+    max-height: 100%;
+    background: transparent;
+  }
+
+  .zigbook-editor-shell .cm-content {
+    min-height: 100%;
+  }
+
+  .zigbook-editor-shell .cm-scroller {
+    padding: 1.25rem clamp(0.75rem, 1.5vw, 1.5rem) 1.5rem clamp(0.75rem, 1.5vw, 1.5rem);
+    height: 100%;
+    max-height: 100%;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--b3) / 0.6) transparent;
+  }
+
+  .zigbook-editor-shell .cm-scroller::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+
+  .zigbook-editor-shell .cm-scroller::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .zigbook-editor-shell .cm-scroller::-webkit-scrollbar-thumb {
+    background: hsl(var(--b3) / 0.6);
+    border-radius: 999px;
+  }
+
+  .zigbook-editor-shell .cm-gutters {
+    padding: 1.25rem 0.75rem 1.25rem 1.25rem;
+  }
+
+  .zigbook-editor-shell .cm-line {
+    padding-right: clamp(1rem, 2vw, 2rem);
+  }
+
+  /* Playground console/output scrollbars */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--bc) / 0.2) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--bc) / 0.2);
+    border-radius: 3px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--bc) / 0.3);
+  }
+}
+
 /* Chapter prose styling */
 .prose-zigbook {
   @apply text-base leading-relaxed text-base-content;

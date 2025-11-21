@@ -34,9 +34,7 @@ export default function ChapterOutline({ targetId = 'chapter-article' }: Chapter
     }
 
     // Fallback for older browsers
-    // eslint-disable-next-line deprecation/deprecation
     mediaQuery.addListener(updatePreference)
-    // eslint-disable-next-line deprecation/deprecation
     return () => mediaQuery.removeListener(updatePreference)
   }, [])
 

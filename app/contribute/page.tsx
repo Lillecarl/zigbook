@@ -1,4 +1,5 @@
 import Navbar from '@/components/Navbar'
+import Footer from '@/components/Footer'
 import { getAllChapters } from '@/lib/xml-parser'
 
 export const metadata = {
@@ -98,7 +99,7 @@ export default async function ContributePage() {
                     <p>
                       Zigbook&apos;s chapter text is written and edited by humans. While UI code and tooling
                       around the book may use automation, <strong>AI-generated chapter content is not
-                      accepted</strong>.
+                        accepted</strong>.
                     </p>
                   </div>
                 </div>
@@ -117,13 +118,13 @@ export default async function ContributePage() {
                 </p>
                 <ul>
                   <li>
-                    <a href="https://ziggit.dev" target="_blank" rel="noopener noreferrer">
-                      Ziggit
+                    <a href="https://forums.zigbook.net" target="_blank" rel="noopener noreferrer">
+                      Ziglang Forums
                     </a>{' '}
                     – community forum for Zig discussions.
                   </li>
                   <li>
-                    <a href="https://github.com/ziglang/zig/discussions" target="_blank" rel="noopener noreferrer">
+                    <a href="https://forums.zigbook.net/category/12/deep-dives" target="_blank" rel="noopener noreferrer">
                       Zig compiler discussions
                     </a>{' '}
                     – design notes, proposals, and deep dives.
@@ -144,6 +145,8 @@ export default async function ContributePage() {
           </section>
         </div>
       </main>
+
+      <Footer />
     </div>
   )
 }

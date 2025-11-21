@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import Navbar from '@/components/Navbar'
+import Footer from '@/components/Footer'
 import { getAllChapters } from '@/lib/xml-parser'
 
 export default async function NotFound() {
@@ -34,6 +35,8 @@ export default async function NotFound() {
           </div>
         </section>
       </main>
+
+      <Footer />
     </div>
   )
 }

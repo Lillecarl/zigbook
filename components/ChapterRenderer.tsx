@@ -49,12 +49,13 @@ function renderMixedContent(children: any[], keyPrefix: string = '0'): React.Rea
     
     // Links
     if (child['#name'] === 'link') {
-      const href = child.$?.['xl:href'] || child.$?.href
+      const rawHref = child.$?.['xl:href'] ?? child.$?.href
+      const href = typeof rawHref === 'string' ? rawHref : ''
       const text = child._ || ''
-      
-      const isInternal = href && (href.endsWith('.xml') || href.endsWith('.adoc'))
-      const finalHref = isInternal ? `/chapters/${href.replace(/\.(xml|adoc)$/, '')}` : href
-      
+
+      const isInternal = href.endsWith('.xml') || href.endsWith('.adoc')
+      const finalHref = isInternal ? `/chapters/${href.replace(/\.(xml|adoc)$/, '')}` : href || '#'
+
       return isInternal ? (
         <Link key={key} href={finalHref} className="link text-accent">
           {text}
@@ -418,7 +419,7 @@ export default function ChapterRendererV2({ content }: { content: any }) {
         </svg>
         <div>
           <h3 className="font-bold">Chapter Not Yet Available</h3>
-          <div className="text-sm">This chapter hasn't been converted to XML yet.</div>
+          <div className="text-sm">This chapter hasn&apos;t been converted to XML yet.</div>
         </div>
       </div>
     )

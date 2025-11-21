@@ -1,21 +1,30 @@
 'use client'
 
 import Link from 'next/link'
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import ThemeToggle from './ThemeToggle'
 import { useCommandPalette } from './CommandPaletteContext'
+import NewLaunchPopover from './NewLaunchPopover'
 
 interface NavbarProps {
   chapters?: Array<{ id: string; title: string; number: string }>
   currentChapterId?: string
 }
 
+const PLAYGROUND_VISITED_KEY = 'zigbook-playground-visited'
+const FORUMS_VISITED_KEY = 'zigbook-forums-visited'
+
 export default function Navbar({ chapters = [], currentChapterId }: NavbarProps) {
   const [chapterQuery, setChapterQuery] = useState('')
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
+  const [hasPlaygroundAcknowledged, setHasPlaygroundAcknowledged] = useState<boolean | null>(null)
+  const [hasForumsAcknowledged, setHasForumsAcknowledged] = useState<boolean | null>(null)
+  const [isCtaClusterVisible, setIsCtaClusterVisible] = useState(false)
+  const ctaClusterRef = useRef<HTMLDivElement | null>(null)
   const router = useRouter()
   const { open: openCommandPalette } = useCommandPalette()
-  
+
   const currentChapter = chapters.find(c => c.id === currentChapterId)
 
   const normalizedQuery = chapterQuery.trim().toLowerCase()
@@ -28,6 +37,61 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
     })
   }, [chapters, normalizedQuery])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    setHasPlaygroundAcknowledged(window.localStorage.getItem(PLAYGROUND_VISITED_KEY) === '1')
+    setHasForumsAcknowledged(window.localStorage.getItem(FORUMS_VISITED_KEY) === '1')
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const updateMotionPreference = () => setPrefersReducedMotion(mediaQuery.matches)
+    updateMotionPreference()
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', updateMotionPreference)
+    } else if (typeof mediaQuery.addListener === 'function') {
+      mediaQuery.addListener(updateMotionPreference)
+    }
+    return () => {
+      if (typeof mediaQuery.removeEventListener === 'function') {
+        mediaQuery.removeEventListener('change', updateMotionPreference)
+      } else if (typeof mediaQuery.removeListener === 'function') {
+        mediaQuery.removeListener(updateMotionPreference)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!ctaClusterRef.current) {
+      setIsCtaClusterVisible(true)
+      return
+    }
+    if (typeof IntersectionObserver === 'undefined') {
+      setIsCtaClusterVisible(true)
+      return
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      setIsCtaClusterVisible(entry.isIntersecting)
+    }, { threshold: 0.25 })
+    observer.observe(ctaClusterRef.current)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === PLAYGROUND_VISITED_KEY) {
+        setHasPlaygroundAcknowledged(event.newValue === '1')
+      }
+      if (event.key === FORUMS_VISITED_KEY) {
+        setHasForumsAcknowledged(event.newValue === '1')
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [])
+
   const handleRandomChapter = () => {
     if (!chapters.length) return
     const index = Math.floor(Math.random() * chapters.length)
@@ -36,13 +100,46 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
     router.push(`/chapters/${chapter.id}`)
   }
 
+  const closeDrawer = () => {
+    const drawer = document.getElementById('nav-drawer') as HTMLInputElement | null
+    if (drawer) drawer.checked = false
+  }
+
+  const markPlaygroundAcknowledged = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(PLAYGROUND_VISITED_KEY, '1')
+    }
+    setHasPlaygroundAcknowledged(true)
+  }, [])
+
+  const markForumsAcknowledged = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(FORUMS_VISITED_KEY, '1')
+    }
+    setHasForumsAcknowledged(true)
+  }, [])
+
+  const navCtaBase =
+    'relative btn btn-sm font-semibold uppercase tracking-[0.25em] transition-all duration-200 hover:-translate-y-0.5 active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 shadow-[0_6px_18px_rgba(0,0,0,0.15)]'
+  const shouldHighlightPlayground = hasPlaygroundAcknowledged === false
+  const shouldHighlightForums = hasForumsAcknowledged === false
+  const ctaAnimationEnabled = isCtaClusterVisible && !prefersReducedMotion
+  const getHighlightClass = (isActive: boolean) =>
+    isActive
+      ? 'ring-1 ring-accent/60 ring-offset-2 ring-offset-base-100 shadow-[0_0_22px_rgba(248,169,73,0.45)]'
+      : ''
+  const getBadgePulseClass = (isActive: boolean) =>
+    isActive && ctaAnimationEnabled ? 'motion-safe:animate-[pulse_3s_ease-in-out_infinite]' : ''
+  const badgeBaseClass =
+    'pointer-events-none absolute -bottom-2 -right-2 translate-x-1/3 translate-y-1/3 rounded-full border border-success/80 bg-success px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-[0.25em] text-success-content shadow-[0_10px_25px_rgba(0,0,0,0.35)]'
+
   return (
     <>
       {/* Main Navbar */}
       <div className="navbar bg-base-100 shadow-lg sticky top-0 z-50 px-2 sm:px-4 w-full">
         <div className="flex-none lg:hidden">
-          <label 
-            htmlFor="nav-drawer" 
+          <label
+            htmlFor="nav-drawer"
             className="btn btn-ghost btn-sm btn-circle"
             aria-label="Open menu"
           >
@@ -51,7 +148,7 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
             </svg>
           </label>
         </div>
-        
+
         <div className="flex-1 min-w-0">
           <Link href="/" className="btn btn-ghost text-base sm:text-lg md:text-xl font-bold px-2 sm:px-4">
             Zigbook
@@ -74,8 +171,50 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
             </div>
           )}
         </div>
-        
+
         <div className="flex-none flex items-center gap-2">
+          <div ref={ctaClusterRef} className="hidden md:inline-flex items-center gap-2 mr-1">
+            <div className="tooltip tooltip-bottom" data-tip="Browse the full Zigbook curriculum" tabIndex={0}>
+              <Link
+                href="/chapters/00__zigbook_introduction"
+                className={`${navCtaBase} border border-accent/70 text-accent hover:border-accent hover:bg-accent/10 focus-visible:outline-accent/70 bg-transparent`}
+              >
+                Chapters
+              </Link>
+            </div>
+            <div className="tooltip tooltip-bottom" data-tip="Compile Zig snippets in-browser via WASM" tabIndex={0}>
+              <Link
+                href="/playground"
+                className={`${navCtaBase} border border-accent/60 bg-accent/15 text-accent hover:bg-accent/25 focus-visible:outline-accent/70 ${getHighlightClass(shouldHighlightPlayground)}`}
+                onClick={markPlaygroundAcknowledged}
+                aria-label="Open the Zigbook Playground"
+              >
+                Playground
+                {shouldHighlightPlayground && (
+                  <span className={`${badgeBaseClass} ${getBadgePulseClass(shouldHighlightPlayground)}`}>
+                    New
+                  </span>
+                )}
+              </Link>
+            </div>
+            <div className="tooltip tooltip-bottom" data-tip="Join the Zigbook community forums" tabIndex={0}>
+              <a
+                href="https://forums.zigbook.net/"
+                className={`${navCtaBase} border border-accent/80 bg-accent text-base-100 hover:bg-accent/90 focus-visible:outline-accent/80 ${getHighlightClass(shouldHighlightForums)}`}
+                target="_blank"
+                rel="noreferrer"
+                onClick={markForumsAcknowledged}
+                aria-label="Visit the Zigbook forums"
+              >
+                Forums
+                {shouldHighlightForums && (
+                  <span className={`${badgeBaseClass} ${getBadgePulseClass(shouldHighlightForums)}`}>
+                    NEW
+                  </span>
+                )}
+              </a>
+            </div>
+          </div>
           {/* Command palette trigger */}
           <button
             type="button"
@@ -140,6 +279,21 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
                 <Link href="/chapters/00__zigbook_introduction">Chapters (Table of Contents)</Link>
               </li>
               <li>
+                <Link href="/playground" onClick={markPlaygroundAcknowledged}>
+                  Playground
+                </Link>
+              </li>
+              <li>
+                <a
+                  href="https://forums.zigbook.net/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={markForumsAcknowledged}
+                >
+                  Forums
+                </a>
+              </li>
+              <li>
                 <Link href="/contribute">Contribute</Link>
               </li>
               {chapters.length > 0 && (
@@ -161,6 +315,15 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
                   GitHub
                 </a>
               </li>
+              <li className="menu-title mt-1">
+                <span>Legal</span>
+              </li>
+              <li>
+                <Link href="/privacy-policy">Privacy Policy</Link>
+              </li>
+              <li>
+                <Link href="/terms-of-service">Terms of Service</Link>
+              </li>
             </ul>
           </div>
         </div>
@@ -176,7 +339,7 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
               <Link href="/" className="text-lg sm:text-xl font-bold">Zigbook</Link>
               <label htmlFor="nav-drawer" className="btn btn-ghost btn-sm btn-circle">✕</label>
             </div>
-            
+
             <div className="mb-2">
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-xs uppercase tracking-wider text-base-content/70">
@@ -210,6 +373,49 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
               </label>
             </div>
 
+            <div className="mt-4">
+              <div className="text-[0.65rem] uppercase tracking-wider text-base-content/60">
+                Navigation
+              </div>
+              <ul className="menu menu-sm gap-1 mt-2 rounded-2xl border border-base-300/50 bg-base-100/80 p-2 shadow-sm">
+                <li>
+                  <Link
+                    href="/chapters/00__zigbook_introduction"
+                    onClick={closeDrawer}
+                    className="text-xs"
+                  >
+                    Chapters (Table of Contents)
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/playground"
+                    onClick={(e) => {
+                      closeDrawer()
+                      markPlaygroundAcknowledged()
+                    }}
+                    className="text-xs"
+                  >
+                    Playground
+                  </Link>
+                </li>
+                <li>
+                  <a
+                    href="https://forums.zigbook.net/"
+                    onClick={() => {
+                      closeDrawer()
+                      markForumsAcknowledged()
+                    }}
+                    className="text-xs"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Forums
+                  </a>
+                </li>
+              </ul>
+            </div>
+
             <ul className="menu-md gap-1 mt-2 overflow-y-auto">
               {filteredChapters.map((chapter) => {
                 const isActive = currentChapterId === chapter.id
@@ -225,15 +431,11 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
                     <Link
                       href={`/chapters/${chapter.id}`}
                       className={`${baseItem} ${isActive ? activeItem : inactiveItem}`}
-                      onClick={() => {
-                        const drawer = document.getElementById('nav-drawer') as HTMLInputElement
-                        if (drawer) drawer.checked = false
-                      }}
+                      onClick={closeDrawer}
                     >
                       <span
-                        className={`badge badge-xs sm:badge-sm shrink-0 ${
-                          isActive ? 'badge-primary' : 'badge-neutral'
-                        }`}
+                        className={`badge badge-xs sm:badge-sm shrink-0 ${isActive ? 'badge-primary' : 'badge-neutral'
+                          }`}
                       >
                         {chapter.number}
                       </span>
@@ -254,6 +456,12 @@ export default function Navbar({ chapters = [], currentChapterId }: NavbarProps)
           </aside>
         </div>
       </div>
+      <NewLaunchPopover
+        highlightPlayground={shouldHighlightPlayground}
+        highlightForums={shouldHighlightForums}
+        onPlaygroundNavigate={markPlaygroundAcknowledged}
+        onForumsNavigate={markForumsAcknowledged}
+      />
     </>
   )
 }
