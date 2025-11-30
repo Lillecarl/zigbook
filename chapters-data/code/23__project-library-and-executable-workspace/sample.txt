@@ -1,7 +1,0 @@
-The Zig programming language aims to be a simple, optimal, and robust language.
-
-It provides manual memory management with compile-time safety guarantees.
-Zig has no hidden control flow, no hidden memory allocations.
-The language is designed to be easily understood and debugged.
-
-This is a sample text file for demonstration purposes.

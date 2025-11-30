@@ -1,2 +1,0 @@
-Instrument everything.
-Keep the randomness reproducible when tests demand it.

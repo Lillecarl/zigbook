@@ -1,5 +1,0 @@
-Modules registered in build.zig:
-  libA      -> packages/libA/analytics.zig
-  libB      -> packages/libB/report.zig (imports libA, palette)
-  palette   -> vendor/palette/palette.zig (anonymous)
-  executable -> app/main.zig

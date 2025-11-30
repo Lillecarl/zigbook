@@ -1,2 +1,0 @@
-Hello from @embedFile!
-This text is compiled into the binary at build time.

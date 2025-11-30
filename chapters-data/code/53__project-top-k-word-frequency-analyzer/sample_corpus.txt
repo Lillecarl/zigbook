@@ -1,5 +1,0 @@
-Patterns emerge when systems talk to each other. Reliable services log the same nouns over and over, and monitoring tools repeat the verbs. Understanding that cadence is the first step toward meaningful alerts.
-
-A fast inventory scraper might say: request, request, queue, parse, retry. A resilient job worker drumbeats: start, transform, publish, ack, sleep. Observability teams cherish these words; they are the chords in a song about load and latency.
-
-We measure phrases too. "Latency budget" rises when customers are impatient. "Retry storm" spikes whenever caches fall behind. The top words change per domain, yet the practice of counting them remains universal.
